@@ -266,6 +266,60 @@ prefix_output_is_broken() {
     grep -qE 'Fontconfig error|error while loading shared libraries|wine: (failed|cannot|could not)' <<< "$1"
 }
 
+# Runtime modes tried by "auto", in order. no-bwrap first so hosts that already
+# work keep their behaviour; host next, since it is what fixes a Proton build
+# protontricks cannot pair with a runtime; container last.
+readonly -a RUNTIME_MODE_CANDIDATES=(no-bwrap host container)
+
+# Smoke-tests one runtime mode by asking wine for its version. Echoes a short
+# human-readable result and returns 0 only when the environment came back clean.
+test_runtime_mode() {
+    local candidate="$1" out rc=0
+    out="$(PREFIX_CMD_TIMEOUT=180 RESOLVED_RUNTIME_MODE="$candidate" \
+        run_in_prefix "wine --version" 2>&1)" || rc=$?
+
+    if [ "$rc" -eq 0 ] && ! prefix_output_is_broken "$out"; then
+        echo "$(grep -oE 'wine-[0-9][^[:space:]]*' <<< "$out" | head -n 1 || echo 'wine ok')"
+        return 0
+    fi
+
+    local reason
+    reason="$(grep -E 'Fontconfig error|error while loading|wine: ' <<< "$out" \
+        | head -n 1 | sed 's/^[[:space:]]*//' || true)"
+    echo "exit=$rc${reason:+ -- $reason}"
+    return 1
+}
+
+# The Proton build a prefix was last created or updated with. config_info holds
+# the version string on line 1 and <proton root>/files/share/fonts/ on line 2.
+get_prefix_proton_version() {
+    local ci="$VRC_COMPATDATA/config_info"
+    [ -f "$ci" ] || return 1
+    head -n 1 "$ci"
+}
+
+get_prefix_proton_dir() {
+    local ci="$VRC_COMPATDATA/config_info"
+    [ -f "$ci" ] || return 1
+    local fonts_dir
+    fonts_dir="$(sed -n '2p' "$ci")"
+    [ -n "$fonts_dir" ] || return 1
+    fonts_dir="${fonts_dir%/}"                       # .../files/share/fonts
+    echo "$(dirname "$(dirname "$(dirname "$fonts_dir")")")"
+}
+
+# The Steam Runtime app id a Proton build demands, if it declares one. A build
+# that requires a runtime protontricks cannot locate is the usual source of
+# "Current Steam Runtime not recognized by Protontricks".
+get_prefix_runtime_appid() {
+    local proton_dir
+    proton_dir="$(get_prefix_proton_dir)" || return 1
+    local manifest="$proton_dir/toolmanifest.vdf"
+    [ -f "$manifest" ] || return 1
+    grep -oE '"require_tool_appid"[[:space:]]*"[0-9]+"' "$manifest" \
+        | grep -oE '[0-9]+' | head -n 1
+}
+
 # Picks the runtime mode to use for every subsequent wine call. An explicit
 # --runtime is honoured as-is; "auto" probes candidates and takes the first one
 # that yields a clean `wine --version`.
@@ -288,23 +342,15 @@ probe_runtime_mode() {
         return 0
     fi
 
-    local candidate out rc wine_ver
-    for candidate in no-bwrap host container; do
+    local candidate result
+    for candidate in "${RUNTIME_MODE_CANDIDATES[@]}"; do
         log_info "Probing Proton runtime mode '$candidate'..."
-        rc=0
-        out="$(PREFIX_CMD_TIMEOUT=180 RESOLVED_RUNTIME_MODE="$candidate" \
-            run_in_prefix "wine --version" 2>&1)" || rc=$?
-
-        if [ "$rc" -eq 0 ] && ! prefix_output_is_broken "$out"; then
+        if result="$(test_runtime_mode "$candidate")"; then
             RESOLVED_RUNTIME_MODE="$candidate"
-            wine_ver="$(grep -oE 'wine-[0-9][^[:space:]]*' <<< "$out" | head -n 1 || true)"
-            log_success "Runtime mode '$candidate' is usable${wine_ver:+ (${wine_ver})}."
+            log_success "Runtime mode '$candidate' is usable (${result})."
             return 0
         fi
-
-        log_warn "Runtime mode '$candidate' produced a broken wine environment (exit $rc):"
-        grep -E 'Fontconfig error|not recognized|error while loading|wine: ' <<< "$out" \
-            | head -n 3 | sed 's/^/      /' || true
+        log_warn "Runtime mode '$candidate' produced a broken wine environment: ${result}"
     done
 
     log_error "No Steam Runtime mode produced a working wine environment."
@@ -447,6 +493,18 @@ show_diagnostics() {
         echo -e "  * Prefix Root:           ${CYAN}${VRC_COMPATDATA}${NC}"
         echo -e "  * Prefix pfx:            ${CYAN}${VRC_COMPATDATA}/pfx${NC}"
 
+        local proton_ver proton_dir runtime_appid
+        proton_ver="$(get_prefix_proton_version || echo 'Unknown (prefix never launched?)')"
+        proton_dir="$(get_prefix_proton_dir || echo 'Unknown')"
+        runtime_appid="$(get_prefix_runtime_appid || echo '')"
+        echo -e "  * Proton Build:          ${CYAN}${proton_ver}${NC}"
+        echo -e "  * Proton Path:           ${CYAN}${proton_dir}${NC}"
+        if [ -n "$runtime_appid" ]; then
+            echo -e "  * Required Steam Runtime: ${CYAN}appid ${runtime_appid}${NC}"
+        else
+            echo -e "  * Required Steam Runtime: ${YELLOW}None declared (custom Proton; protontricks may not find a runtime)${NC}"
+        fi
+
         local user_reg_status="Missing"
         [ -f "$VRC_COMPATDATA/pfx/user.reg" ] && user_reg_status="Present"
         local sys_reg_status="Missing"
@@ -484,6 +542,40 @@ show_diagnostics() {
         else
             echo -e "  * .NET WindowsDesktop:   ${YELLOW}None detected${NC}"
         fi
+
+        local required_channel
+        required_channel="$(get_required_dotnet_channel "$(get_vrcosc_install_dir)" || echo '')"
+        if [ -z "$required_channel" ]; then
+            echo -e "  * .NET Required by App:  ${YELLOW}Unknown (VRCOSC.runtimeconfig.json not readable)${NC}"
+        elif has_desktop_runtime_channel "$required_channel"; then
+            echo -e "  * .NET Required by App:  ${GREEN}${required_channel}.x (satisfied)${NC}"
+        else
+            echo -e "  * .NET Required by App:  ${RED}${required_channel}.x (MISSING -- VRCOSC will not start)${NC}"
+            echo -e "    ${YELLOW}.NET does not roll forward across major versions; run install.sh again to fix.${NC}"
+        fi
+
+        echo ""
+        echo -e "${BOLD}=== Wine Environment Health ===${NC}"
+        local contaminated
+        contaminated="$(list_contaminated_env | tr '\n' ' ')"
+        if [ -n "$contaminated" ]; then
+            echo -e "  * Leaked Runtime Vars:   ${YELLOW}${contaminated}${NC}"
+            echo -e "    ${YELLOW}These are scrubbed from wine calls; unscrubbed they cause bogus errors${NC}"
+            echo -e "    ${YELLOW}such as 'Fontconfig error: /etc/fonts/fonts.conf: out of memory'.${NC}"
+        else
+            echo -e "  * Leaked Runtime Vars:   ${GREEN}None${NC}"
+        fi
+
+        local candidate result
+        for candidate in "${RUNTIME_MODE_CANDIDATES[@]}"; do
+            if result="$(test_runtime_mode "$candidate")"; then
+                printf '  * Runtime [%-9s]:  ' "$candidate"
+                echo -e "${GREEN}OK (${result})${NC}"
+            else
+                printf '  * Runtime [%-9s]:  ' "$candidate"
+                echo -e "${RED}Broken${NC} ${YELLOW}${result}${NC}"
+            fi
+        done
 
         echo ""
         echo -e "${BOLD}=== VRCOSC User Config Directories ===${NC}"
