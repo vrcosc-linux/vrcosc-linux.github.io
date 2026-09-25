@@ -25,6 +25,8 @@ INFO_MODE=0
 DRY_RUN=0
 SKIP_FIREWALL=0
 VRC_COMPATDATA=""
+RUNTIME_MODE="auto"        # auto | no-bwrap | host | container
+RESOLVED_RUNTIME_MODE=""   # filled in by probe_runtime_mode()
 
 log_info()    { echo -e "${BLUE}$*${NC}"; }
 log_success() { echo -e "${GREEN}$*${NC}"; }
@@ -106,6 +108,11 @@ print_usage() {
     echo "      --dry-run             Simulate actions without writing files or running installers"
     echo "      --skip-firewall       Do not attempt firewall port configuration"
     echo "      --prefix <PATH>       Explicitly specify the VRChat compatdata/438100 folder"
+    echo "      --runtime <MODE>      Steam Runtime mode for wine calls (default: auto)"
+    echo "                              auto       probe modes below and use the first clean one"
+    echo "                              no-bwrap   Steam Runtime without bwrap containerisation"
+    echo "                              host       no Steam Runtime; use host libraries only"
+    echo "                              container  Steam Runtime with bwrap containerisation"
     echo "  -h, --help                Show this help message"
 }
 
@@ -146,6 +153,18 @@ parse_arguments() {
                     exit 1
                 fi
                 ;;
+            --runtime)
+                case "${2:-}" in
+                    auto|no-bwrap|host|container)
+                        RUNTIME_MODE="$2"
+                        shift 2
+                        ;;
+                    *)
+                        log_error "Error: --runtime requires one of: auto, no-bwrap, host, container."
+                        exit 1
+                        ;;
+                esac
+                ;;
             --dry-run)
                 DRY_RUN=1
                 shift
@@ -180,6 +199,118 @@ check_dependencies() {
         log_error "Error: The following required dependencies are missing: ${missing[*]}"
         exit 1
     fi
+}
+
+# --- Proton / Steam Runtime Environment Hygiene ---
+
+# Variables a Steam-launched shell (or a half-initialised Steam Runtime) exports
+# into our environment. Left in place they make wine load the runtime's pinned
+# libraries while still reading the host's config files, which surfaces as
+# misleading errors such as:
+#   Fontconfig error: "/etc/fonts/fonts.conf", line 86: out of memory
+# fontconfig reports every config parse failure as "out of memory" -- there is no
+# actual memory pressure, the library and the config file simply disagree.
+readonly -a CONTAMINATING_ENV_VARS=(
+    LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT
+    FONTCONFIG_PATH FONTCONFIG_FILE
+    GTK_PATH GDK_PIXBUF_MODULE_FILE GIO_MODULE_DIR
+    GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_SYSTEM_PATH_1_0
+    STEAM_RUNTIME STEAM_RUNTIME_LIBRARY_PATH SYSTEM_LD_LIBRARY_PATH
+    PRESSURE_VESSEL_RUNTIME PRESSURE_VESSEL_RUNTIME_BASE PRESSURE_VESSEL_PREFIX
+    WINEPREFIX WINEDLLPATH WINELOADER WINESERVER
+)
+
+# Prints the names of contaminating variables that are currently set.
+list_contaminated_env() {
+    local v
+    for v in "${CONTAMINATING_ENV_VARS[@]}"; do
+        [ -n "${!v:-}" ] && echo "$v"
+    done
+    return 0
+}
+
+# Maps a runtime mode onto the protontricks flags that implement it.
+runtime_mode_flags() {
+    case "$1" in
+        no-bwrap)  echo "--no-bwrap" ;;
+        host)      echo "--no-runtime" ;;
+        container) echo "" ;;
+        *)         echo "--no-bwrap" ;;
+    esac
+}
+
+# Runs a wine command inside the VRChat prefix with a sanitised environment.
+# Every protontricks invocation in this script goes through here so the runtime
+# mode and the environment scrubbing are configured in exactly one place.
+run_in_prefix() {
+    local mode="${RESOLVED_RUNTIME_MODE:-$RUNTIME_MODE}"
+    [ "$mode" = "auto" ] && mode="no-bwrap"
+
+    local -a flags=()
+    read -r -a flags <<< "$(runtime_mode_flags "$mode")"
+
+    local -a scrub=()
+    local v
+    for v in "${CONTAMINATING_ENV_VARS[@]}"; do
+        scrub+=("-u" "$v")
+    done
+
+    env "${scrub[@]}" timeout "${PREFIX_CMD_TIMEOUT:-0}" \
+        protontricks "${flags[@]}" -c "$1" 438100
+}
+
+# True when wine output shows a broken library/config environment rather than a
+# genuine application failure.
+prefix_output_is_broken() {
+    grep -qE 'Fontconfig error|error while loading shared libraries|wine: (failed|cannot|could not)' <<< "$1"
+}
+
+# Picks the runtime mode to use for every subsequent wine call. An explicit
+# --runtime is honoured as-is; "auto" probes candidates and takes the first one
+# that yields a clean `wine --version`.
+probe_runtime_mode() {
+    if [ "$RUNTIME_MODE" != "auto" ]; then
+        RESOLVED_RUNTIME_MODE="$RUNTIME_MODE"
+        log_info "Using requested Proton runtime mode: ${BOLD}${RESOLVED_RUNTIME_MODE}${NC}"
+        return 0
+    fi
+
+    local contaminated
+    contaminated="$(list_contaminated_env | tr '\n' ' ')"
+    if [ -n "$contaminated" ]; then
+        log_warn "Scrubbing leaked Steam Runtime variables from wine calls: $contaminated"
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        RESOLVED_RUNTIME_MODE="no-bwrap"
+        log_info "Dry run: skipping runtime probe, assuming mode '$RESOLVED_RUNTIME_MODE'."
+        return 0
+    fi
+
+    local candidate out rc wine_ver
+    for candidate in no-bwrap host container; do
+        log_info "Probing Proton runtime mode '$candidate'..."
+        rc=0
+        out="$(PREFIX_CMD_TIMEOUT=180 RESOLVED_RUNTIME_MODE="$candidate" \
+            run_in_prefix "wine --version" 2>&1)" || rc=$?
+
+        if [ "$rc" -eq 0 ] && ! prefix_output_is_broken "$out"; then
+            RESOLVED_RUNTIME_MODE="$candidate"
+            wine_ver="$(grep -oE 'wine-[0-9][^[:space:]]*' <<< "$out" | head -n 1 || true)"
+            log_success "Runtime mode '$candidate' is usable${wine_ver:+ (${wine_ver})}."
+            return 0
+        fi
+
+        log_warn "Runtime mode '$candidate' produced a broken wine environment (exit $rc):"
+        grep -E 'Fontconfig error|not recognized|error while loading|wine: ' <<< "$out" \
+            | head -n 3 | sed 's/^/      /' || true
+    done
+
+    log_error "No Steam Runtime mode produced a working wine environment."
+    echo -e "${YELLOW}This usually means protontricks cannot pair your Proton build with a Steam Runtime.${NC}"
+    echo -e "Try launching VRChat once through Steam, then re-run this script."
+    echo -e "You can also force a mode explicitly, e.g. ${CYAN}--runtime host${NC}."
+    exit 1
 }
 
 find_prefix_silently() {
@@ -520,7 +651,7 @@ Windows Registry Editor Version 5.00
 "DisableHWAcceleration"=dword:00000001
 EOF_REG
 
-    protontricks --no-bwrap -c "wine regedit C:\\vrcosc_disable_hw_acc.reg" 438100
+    run_in_prefix "wine regedit C:\\vrcosc_disable_hw_acc.reg"
     rm -f "$reg_file"
     log_success "WPF registry patch applied successfully."
 }
@@ -549,7 +680,7 @@ install_dotnet_runtime() {
     curl -L -o "$dotnet_installer" "$dotnet_url"
 
     log_info "Installing .NET 10.0 Desktop Runtime in VRChat prefix..."
-    protontricks --no-bwrap -c "wine C:\\windowsdesktop-runtime-10.exe /quiet /norestart" 438100
+    run_in_prefix "wine C:\\windowsdesktop-runtime-10.exe /quiet /norestart"
     rm -f "$dotnet_installer"
     log_success ".NET 10.0 Desktop Runtime installed successfully."
 }
@@ -709,13 +840,25 @@ create_launchers() {
     fi
 
     mkdir -p "$(dirname "$launch_script")"
+    local runtime_flags
+    runtime_flags="$(runtime_mode_flags "${RESOLVED_RUNTIME_MODE:-no-bwrap}")"
+
     cat << EOF_LAUNCHER > "$launch_script"
 #!/usr/bin/env bash
-# VRCOSC Launcher for Linux/Proton
+# VRCOSC Launcher for Linux/Proton -- generated by install.sh
+set -euo pipefail
+
 ENTRY="$win_entry"
 DOTNET="C:/Program Files/dotnet/dotnet.exe"
 
-exec protontricks --no-bwrap -c "wine \\"\$DOTNET\\" \\"\$ENTRY\\" \$*" 438100
+# Drop Steam Runtime variables leaked in by the calling shell. With them set,
+# wine mixes runtime libraries with host config files and fails with misleading
+# errors such as 'Fontconfig error: "/etc/fonts/fonts.conf": out of memory'.
+SCRUB=($(printf -- '-u %s ' "${CONTAMINATING_ENV_VARS[@]}"))
+RUNTIME_FLAGS=(${runtime_flags})
+
+exec env "\${SCRUB[@]}" protontricks "\${RUNTIME_FLAGS[@]}" \\
+    -c "wine \\"\$DOTNET\\" \\"\$ENTRY\\" \$*" 438100
 EOF_LAUNCHER
     chmod +x "$launch_script"
 
@@ -795,6 +938,7 @@ main() {
     check_dependencies
     locate_vrchat_prefix
     configure_protontricks_permissions
+    probe_runtime_mode
     apply_wpf_registry_fix
     install_dotnet_runtime
     install_vrcosc
