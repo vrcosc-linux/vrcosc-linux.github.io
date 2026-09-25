@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRCOSC Linux Installer</title>
+<meta name="description" content="Installer, updater and launcher for running VRCOSC on Linux under Proton.">
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1b1b1f; --muted: #5a5a66;
+    --card: #f4f4f7; --border: #d8d8e0; --link: #2f5fd0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16161a; --fg: #ececf1; --muted: #a0a0ad;
+      --card: #20202a; --border: #32323f; --link: #8fb0ff;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16161a; --fg: #ececf1; --muted: #a0a0ad;
+    --card: #20202a; --border: #32323f; --link: #8fb0ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: 48px 16px;
+  }
+  main { max-width: 42rem; margin: 0 auto; }
+  h1 { font-size: 1.75rem; margin: 0 0 .25rem; }
+  p.lead { color: var(--muted); margin: 0 0 2rem; }
+  h2 { font-size: 1.05rem; margin: 2rem 0 .5rem; }
+  pre {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 16px; overflow-x: auto; margin: 0;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
+  a { color: var(--link); }
+  ul { padding-left: 1.2rem; }
+  li { margin: .35rem 0; }
+  footer { margin-top: 2.5rem; color: var(--muted); font-size: .875rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>VRCOSC Linux Installer</h1>
+  <p class="lead">Installs, updates and launches VRCOSC inside VRChat's own Proton prefix.</p>
+
+  <h2>Install</h2>
+  <pre><code>curl -sSL https://vrcosc-linux.github.io/install.sh | bash</code></pre>
+
+  <h2>Then</h2>
+  <ul>
+    <li>Start VRChat first, then run <code>vrcosc</code> or launch it from your application menu.</li>
+    <li>Run <code>bash install.sh --info</code> if anything misbehaves.</li>
+  </ul>
+
+  <h2>More</h2>
+  <ul>
+    <li><a href="https://github.com/vrcosc-linux/vrcosc-linux.github.io">Source, documentation and issues</a></li>
+    <li><a href="https://github.com/VolcanicArts/VRCOSC">VRCOSC itself</a></li>
+    <li><a href="https://discord.gg/vrcosc-1000862183963496519">VRCOSC Discord</a></li>
+  </ul>
+
+  <footer>Piping a script from the internet into your shell runs it with your permissions.
+  <a href="https://github.com/vrcosc-linux/vrcosc-linux.github.io/blob/main/install.sh">Read it first</a> if you would rather check.</footer>
+</main>
+</body>
+</html>

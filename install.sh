@@ -16,7 +16,13 @@ readonly DISCORD_INVITE="https://discord.gg/vrcosc-1000862183963496519"
 readonly DISCORD_THREAD="https://discord.com/channels/1000862183963496519/1466540047149957374"
 readonly DEFAULT_DOTNET_CHANNEL="10.0"
 readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Logo.png"
-readonly LAUNCH_BRIDGE_URL="https://raw.githubusercontent.com/Bluscream/vrcosc-linux/main/bin/vrc-launch-bridge.exe"
+# Where the launch bridge payload is fetched from when there is no local copy.
+# The Pages domain first, since that is the short URL people install from; raw
+# GitHub second, because Pages serves a build that can lag behind a push.
+readonly -a LAUNCH_BRIDGE_URLS=(
+    "https://vrcosc-linux.github.io/bin/vrc-launch-bridge.exe"
+    "https://raw.githubusercontent.com/vrcosc-linux/vrcosc-linux.github.io/main/bin/vrc-launch-bridge.exe"
+)
 
 # Default state variables (configured solely via command-line arguments)
 VRCOSC_BRANCH="live" # live or beta
@@ -133,15 +139,17 @@ resolve_launch_bridge() {
     [ "$allow_download" -eq 1 ] || return 1
     [ "$DRY_RUN" -eq 1 ] && return 1
 
-    local tmp
+    local tmp url got=0
     tmp="$(mktemp)" || return 1
-    if ! curl -fsSL --connect-timeout 10 -o "$tmp" "$LAUNCH_BRIDGE_URL" 2>/dev/null; then
-        rm -f "$tmp"
-        return 1
-    fi
-    # A rate-limit page or an HTML error body is not a PE binary; refuse it
-    # rather than installing garbage over VRChat's launcher.
-    if [ "$(head -c 2 "$tmp")" != "MZ" ]; then
+    for url in "${LAUNCH_BRIDGE_URLS[@]}"; do
+        curl -fsSL --connect-timeout 10 -o "$tmp" "$url" 2>/dev/null || continue
+        # A rate-limit page or an HTML error body is not a PE binary; refuse it
+        # rather than installing garbage over VRChat's launcher.
+        [ "$(head -c 2 "$tmp")" = "MZ" ] || continue
+        got=1
+        break
+    done
+    if [ "$got" -eq 0 ]; then
         rm -f "$tmp"
         return 1
     fi

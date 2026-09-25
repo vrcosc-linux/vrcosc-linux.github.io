@@ -59,7 +59,7 @@ Before running the installer, ensure you have:
 Copy and paste the following command into your terminal:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/Bluscream/vrcosc-linux/main/install.sh | bash
+curl -sSL https://vrcosc-linux.github.io/install.sh | bash
 ```
 
 ## CLI Options & Usage

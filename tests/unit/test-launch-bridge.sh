@@ -38,6 +38,12 @@ assert_eq "MZ" "$(head -c 2 "$REPO_ROOT/bin/vrc-launch-bridge.exe")"
 # From here on, pretend there is no script file at all -- the piped-install case.
 get_script_dir() { return 0; }
 
+it "tries the Pages URL before raw GitHub"
+assert_contains "${LAUNCH_BRIDGE_URLS[0]}" "vrcosc-linux.github.io/bin/"
+
+it "has a second source to fall back to"
+assert_eq "2" "${#LAUNCH_BRIDGE_URLS[@]}"
+
 it "downloads the bridge when there is no script directory"
 make_curl 'MZfake-bridge-payload'
 bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
@@ -49,6 +55,27 @@ assert_file_exists "$LAUNCH_BRIDGE_CACHE"
 it "reuses the cache without calling curl again"
 rm -f "$WORK/bin/curl"
 assert_eq "$LAUNCH_BRIDGE_CACHE" "$(resolve_launch_bridge)"
+
+it "falls back to the second source when the first one fails"
+rm -rf "$HOME"
+cat > "$WORK/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        http*) url="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+case "$url" in
+    https://vrcosc-linux.github.io/*) exit 22 ;;
+    *) printf 'MZfrom-raw-github' > "$out" ;;
+esac
+CURL
+chmod +x "$WORK/bin/curl"
+bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
+assert_eq "MZfrom-raw-github" "$(cat "$bridge" 2>/dev/null)"
 
 it "refuses a download that is not a PE binary"
 rm -rf "$HOME"
