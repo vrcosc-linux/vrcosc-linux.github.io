@@ -71,3 +71,12 @@ Ran into an issue or need assistance?
 This project was created and is maintained with the help of **Antigravity**, an agentic AI coding assistant designed by **Google DeepMind**.
 
 *Disclaimer: The installation scripts and configuration modifications were generated and validated programmatically. Use at your own risk.*
+
+## Testing
+
+`install.sh` breaks on environments rather than on logic, so the tests are tiered
+by the environment they need. `tests/run-unit.sh` runs offline against fakes in
+seconds; `tests/run-container-matrix.sh` runs the whole thing inside throwaway
+Ubuntu/Debian/Fedora/Arch containers. See [tests/README.md](tests/README.md) for
+what each tier does and does not prove, and for the VM tier that is the only way
+to validate real Proton, bwrap and WPF rendering.

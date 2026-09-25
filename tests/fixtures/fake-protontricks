@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Stand-in for protontricks. Behaviour is chosen with FAKE_PT_PROFILE so tests
+# can reproduce specific host breakages without a real Proton prefix:
+#
+#   clean                every runtime mode works
+#   fontconfig-mismatch  only --no-runtime works; the others emit the bogus
+#                        'Fontconfig error: ... out of memory' seen on hosts
+#                        where runtime libraries meet host config files
+#   bwrap-broken         bwrap containerisation fails (nested sandbox)
+#   all-broken           nothing works
+#   version-fails        `--version` exits non-zero but wine calls are fine
+#                        (the pipx build's pkg_resources warning case)
+#
+# Every invocation is appended to $FAKE_PT_LOG as one record so tests can assert
+# on the flags used AND on which environment variables survived into the call.
+set -uo pipefail
+
+PROFILE="${FAKE_PT_PROFILE:-clean}"
+
+if [ -n "${FAKE_PT_LOG:-}" ]; then
+    {
+        echo "ARGV: $*"
+        for v in LD_LIBRARY_PATH LD_PRELOAD FONTCONFIG_PATH FONTCONFIG_FILE \
+                 STEAM_RUNTIME PRESSURE_VESSEL_RUNTIME WINEPREFIX; do
+            [ -n "${!v:-}" ] && echo "ENV: $v=${!v}"
+        done
+        echo "---"
+    } >> "$FAKE_PT_LOG"
+fi
+
+is_command_call=0
+for arg in "$@"; do
+    [ "$arg" = "-c" ] && is_command_call=1
+done
+
+if [ "$is_command_call" -eq 0 ]; then
+    case "$PROFILE" in
+        version-fails)
+            echo "warning: pkg_resources is deprecated as an API." >&2
+            exit 1
+            ;;
+        *)
+            echo "protontricks (fake-protontricks) 1.12.0"
+            exit 0
+            ;;
+    esac
+fi
+
+mode="container"
+for arg in "$@"; do
+    case "$arg" in
+        --no-runtime) mode="host" ;;
+        --no-bwrap)   mode="no-bwrap" ;;
+    esac
+done
+
+broken() {
+    echo "protontricks (WARNING): Current Steam Runtime not recognized by Protontricks." >&2
+    echo 'Fontconfig error: "/etc/fonts/fonts.conf", line 86: out of memory' >&2
+    echo 'Fontconfig error: Cannot load config file from /etc/fonts/fonts.conf' >&2
+    exit 1
+}
+
+case "$PROFILE" in
+    fontconfig-mismatch) [ "$mode" = "host" ] || broken ;;
+    bwrap-broken)        [ "$mode" = "container" ] && broken ;;
+    all-broken)          broken ;;
+esac
+
+# Succeeded: emit something that looks like the requested command's output.
+cmd="$*"
+case "$cmd" in
+    *"wine --version"*) echo "wine-11.0" ;;
+    *regedit*)          : ;;
+    *windowsdesktop-runtime*)
+        # Simulate the runtime installer populating the prefix. FAKE_PT_INSTALLS_RUNTIME
+        # is an explicit version, or "auto" to install whichever channel the
+        # installer asked for (the channel is in the .exe filename).
+        want="${FAKE_PT_INSTALLS_RUNTIME:-}"
+        if [ "$want" = "auto" ]; then
+            channel="$(printf '%s' "$cmd" \
+                | grep -oE 'windowsdesktop-runtime-[0-9]+\.[0-9]+' \
+                | grep -oE '[0-9]+\.[0-9]+$' || true)"
+            want="${channel:+${channel}.1}"
+        fi
+        if [ -n "${FAKE_PT_PREFIX:-}" ] && [ -n "$want" ]; then
+            mkdir -p "$FAKE_PT_PREFIX/pfx/drive_c/Program Files/dotnet/shared/Microsoft.WindowsDesktop.App/$want"
+            touch "$FAKE_PT_PREFIX/pfx/drive_c/Program Files/dotnet/dotnet.exe"
+        fi
+        ;;
+esac
+exit 0
