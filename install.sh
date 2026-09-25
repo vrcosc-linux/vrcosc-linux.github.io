@@ -94,6 +94,23 @@ get_vrcosc_version_from_dir() {
     echo "Not installed"
 }
 
+# GET a GitHub API URL. Uses GITHUB_TOKEN/GH_TOKEN when the caller has one,
+# because the unauthenticated limit is 60 requests/hour per IP and shared or
+# NAT'd addresses hit it routinely -- which otherwise looks like "GitHub is down".
+# The token is only ever sent to api.github.com, and never echoed.
+github_api() {
+    local url="$1"
+    local -a auth=()
+    local token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -n "$token" ] && [[ "$url" == https://api.github.com/* ]]; then
+        auth=(-H "Authorization: Bearer $token")
+    fi
+    curl -fsS --connect-timeout 10 \
+        -H "User-Agent: vrcosc-installer" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "${auth[@]}" "$url" 2>&1 || true
+}
+
 print_usage() {
     echo -e "${BOLD}VRCOSC Linux Installer & Manager${NC}"
     echo ""
@@ -608,7 +625,7 @@ show_diagnostics() {
     local remote_live="Unavailable (Network/Rate-limited)"
     local remote_beta="Unavailable (Network/Rate-limited)"
     local releases_json
-    releases_json="$(curl -s --connect-timeout 4 -H "User-Agent: vrcosc-installer" https://api.github.com/repos/VolcanicArts/VRCOSC/releases 2>/dev/null || true)"
+    releases_json="$(github_api https://api.github.com/repos/VolcanicArts/VRCOSC/releases)"
     if [ -n "$releases_json" ]; then
         if command -v python3 &>/dev/null; then
             remote_live="$(python3 -c "import json,sys; data=json.loads(sys.stdin.read()); print(next((r['tag_name'] for r in data if not r.get('prerelease')), 'Unavailable'))" <<< "$releases_json" 2>/dev/null || echo 'Unavailable')"
@@ -617,6 +634,10 @@ show_diagnostics() {
             remote_live="$(echo "$releases_json" | grep -B 10 -A 2 '"prerelease": false' | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || echo 'Unavailable')"
             remote_beta="$(echo "$releases_json" | grep -B 10 -A 2 '"prerelease": true' | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || echo 'Unavailable')"
         fi
+    fi
+    if grep -qE 'error: 403|rate limit' <<< "$releases_json"; then
+        remote_live="Rate-limited (export GITHUB_TOKEN to check)"
+        remote_beta="$remote_live"
     fi
     echo -e "  * Remote Latest (Live):   ${CYAN}${remote_live}${NC}"
     echo -e "  * Remote Latest (Beta):   ${CYAN}${remote_beta}${NC}"
@@ -865,13 +886,15 @@ install_dotnet_runtime() {
     fi
 
     log_info "Downloading .NET ${channel} from: $dotnet_url"
-    local dotnet_installer="$VRC_COMPATDATA/pfx/drive_c/windowsdesktop-runtime.exe"
+    # Name the installer after its channel: self-describing if it is ever left
+    # behind, and it lets tests assert which runtime was actually requested.
+    local dotnet_installer="$VRC_COMPATDATA/pfx/drive_c/windowsdesktop-runtime-${channel}.exe"
     [ "$DRY_RUN" -eq 1 ] && return 0
 
     curl -L -o "$dotnet_installer" "$dotnet_url"
 
     log_info "Installing .NET ${channel} Desktop Runtime in VRChat prefix..."
-    run_in_prefix "wine C:\\windowsdesktop-runtime.exe /quiet /norestart"
+    run_in_prefix "wine C:\\windowsdesktop-runtime-${channel}.exe /quiet /norestart"
     rm -f "$dotnet_installer"
 
     verify_dotnet_runtime "$channel"
@@ -900,9 +923,7 @@ verify_dotnet_runtime() {
 install_vrcosc() {
     log_info "Fetching latest VRCOSC release version (channel: $VRCOSC_BRANCH)..."
     local latest_release_json nupkg_url
-    latest_release_json="$(curl -fsS --connect-timeout 10 \
-        -H "User-Agent: vrcosc-installer" \
-        https://api.github.com/repos/VolcanicArts/VRCOSC/releases/latest 2>&1 || true)"
+    latest_release_json="$(github_api https://api.github.com/repos/VolcanicArts/VRCOSC/releases/latest)"
 
     local pkg_pattern="live-full.nupkg"
     [ "$VRCOSC_BRANCH" = "beta" ] && pkg_pattern="beta-full.nupkg"
@@ -922,8 +943,13 @@ install_vrcosc() {
             return 0
         fi
         log_error "Error: Failed to fetch the VRCOSC $VRCOSC_BRANCH package URL."
-        echo -e "${YELLOW}GitHub may be unreachable or rate-limiting this host. Response was:${NC}"
-        printf '%s\n' "$latest_release_json" | head -n 5 | sed 's/^/  /'
+        if grep -qE 'error: 403|rate limit' <<< "$latest_release_json"; then
+            echo -e "${YELLOW}GitHub is rate-limiting this address (60 requests/hour when unauthenticated).${NC}"
+            echo -e "Wait an hour, or export a token first: ${CYAN}export GITHUB_TOKEN=\$(gh auth token)${NC}"
+        else
+            echo -e "${YELLOW}GitHub may be unreachable. Response was:${NC}"
+            printf '%s\n' "$latest_release_json" | head -n 5 | sed 's/^/  /'
+        fi
         exit 1
     fi
 
