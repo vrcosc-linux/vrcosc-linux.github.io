@@ -1,6 +1,13 @@
 # VRCOSC Linux Installer
 
-An automated installer, updater, and launcher manager for running [VRCOSC](https://github.com/VolcanicArts/VRCOSC) on Linux (tested on Bazzite, SteamOS/Steam Deck, Fedora, and general Linux desktop environments).
+An automated installer, updater and launcher manager for running
+[VRCOSC](https://github.com/VolcanicArts/VRCOSC) on Linux.
+
+Developed and tested against real Proton on Bazzite. The installer's own logic
+is exercised on Ubuntu, Debian, Fedora and Arch in containers, which covers
+shell and userland differences but not Proton, wine or WPF rendering. Other
+distributions, SteamOS and the Steam Deck should work and are unverified; if
+you try one, the Discord thread below is the place to say how it went.
 
 ## How it works
 
@@ -14,7 +21,7 @@ VRCOSC and arranges for it to run in the right place.
 This installer configures VRCOSC to run seamlessly by:
 
 1. **Auto-detecting your VRChat Proton prefix** across multiple internal, secondary, and external storage drives (`libraryfolders.vdf`), with an interactive prompt fallback.
-2. **Applying the WPF registry patch** to disable Direct3D acceleration, completely eliminating the black window / invisible context menu rendering bug under Wine/Proton.
+2. **Applying the WPF registry patch** (`Avalon.Graphics\DisableHWAcceleration`) to turn off WPF hardware acceleration, which is what causes the black window and invisible context menus under wine/Proton.
 3. **Provisioning the .NET Desktop Runtime** inside VRChat's Proton prefix — the
    exact version VRCOSC asks for, read from its `VRCOSC.runtimeconfig.json`, then
    verified to be present afterwards. .NET does not roll forward across major
@@ -74,9 +81,9 @@ bash install.sh [OPTIONS]
 | `-i, --info` | Diagnostics: OS, tooling, Proton build, prefix, .NET runtime vs what VRCOSC requires, wine environment health, whether a VRChat session is joinable, and installed vs released VRCOSC versions |
 | `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC configs & prefix registries to Desktop |
 | `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
-| `--branch <live\|beta>` | Choose release channel (`live` or `beta`, defaults to `live`) |
+| `--branch <live\|beta>` | Choose release channel, `live` or `beta`, default `live`. Beta is published as a GitHub prerelease and installs alongside live, with its own directory, settings and `vrcosc-beta` command |
 | `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |
-| `--dry-run` | Simulate actions without modifying files or installing runtimes |
+| `--dry-run` | Simulate actions without modifying files or installing runtimes. Honoured by every mode, including `--uninstall` |
 | `--skip-firewall` | Skip firewall inspection and rule generation |
 | `--patch` | Replace VRChat's `launch.exe` with the IPC bridge, enabling `vrchat://` navigation. Off by default, since it modifies VRChat's install directory. `--path` is accepted as an alias |
 | `--prefix <PATH>` | Explicitly supply your custom VRChat compatdata/438100 path |
@@ -139,6 +146,10 @@ GitHub rate-limited your address. Wait an hour, or
 Working as intended — you have a build ahead of the published release. Use
 `--force` if you really want the released version.
 
+**`vrchat://` links and in-game navigation from VRCOSC do nothing.**
+The `launch.exe` bridge is not installed. It is opt-in: rerun the installer with
+`--patch`. `--info` shows whether the bridge is in place.
+
 **VRChat and VRCOSC seem to interfere with each other.**
 Start VRChat first and let it finish loading, then start VRCOSC. `--info` shows
 what is currently using the prefix.
@@ -151,9 +162,16 @@ Ran into an issue or need assistance?
 
 ## Credits & AI Disclaimer
 
-This project was created and is maintained with the help of **Antigravity**, an agentic AI coding assistant designed by **Google DeepMind**.
+This project is written with agentic AI coding assistants. It was created with
+**Antigravity** by **Google DeepMind**, and the later work — the wine session
+join, the .NET version detection, the `launch.exe` bridge handling and the test
+suites — was done with **Claude Code** by **Anthropic**. The commit history
+shows which work came from which.
 
-*Disclaimer: The installation scripts and configuration modifications were generated and validated programmatically. Use at your own risk.*
+*Disclaimer: the installation scripts and configuration modifications were
+generated and validated programmatically. Claims in this README about measured
+behaviour are backed by [docs/prefix-session-findings.md](docs/prefix-session-findings.md);
+anything else, treat as untested on your hardware. Use at your own risk.*
 
 ## Testing
 
