@@ -17,6 +17,13 @@ This installer configures VRCOSC to run seamlessly by:
    - The installer creates a read-only backup (`launch.org.exe`, `chmod 444`) and places a drop-in C# replacement bridge (`launch.exe`, `chmod 555`).
    - The bridge directly communicates with VRChat's named pipe to open in-game world menus in real-time, falling back cleanly to the original binary if VRChat isn't running.
 7. **Setting up official application branding and desktop integration** (`vrcosc.png` hicolor icon, `vrcosc.desktop` launcher, and terminal command `vrcosc`).
+8. **Running VRCOSC inside VRChat's own wine session.** Steam runs the game in a
+   container with its own wineserver; anything started outside it lands in a
+   separate wine session and can never see `VRChat.exe`, its named pipes or its
+   windows — VRCOSC then treats the game as permanently closed. The launcher finds
+   the running game, enters its namespaces (`nsenter -U -m`, no root needed) and
+   starts VRCOSC there with Proton's own environment. Measured, not assumed: see
+   [docs/prefix-session-findings.md](docs/prefix-session-findings.md).
 
 ## Prerequisites
 
@@ -52,6 +59,13 @@ bash install.sh [OPTIONS]
 | `-h, --help` | Show command usage and options |
 
 ## Running VRCOSC
+
+**Start VRChat first, then VRCOSC.** With the game running, VRCOSC joins its wine
+session and sees it (process, log, OSC, `vrchat://` navigation). Started before
+the game, VRCOSC runs in a session of its own — it still works, but cannot detect
+VRChat; close and relaunch it once the game is up. `VRCOSC_JOIN=0 vrcosc` forces
+the standalone session. Joining needs `nsenter` (util-linux), which every
+mainstream distro ships.
 
 Once installed, you can launch VRCOSC:
 * From your application menu/search bar (search for **VRCOSC**).

@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stand-in for nsenter: records the namespace arguments, then runs the command
+# in place. Tests cannot enter a real container, but they can assert that the
+# launcher asked to, and that what it ran inside is right.
+set -uo pipefail
+[ -n "${FAKE_NSENTER_LOG:-}" ] && echo "NSENTER: $*" >> "$FAKE_NSENTER_LOG"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -t) shift 2 ;;
+        -U|-m|--preserve-credentials) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+exec "$@"

@@ -84,6 +84,33 @@ reports exactly: flatpak protontricks (separate session) coexists but never
 detects VRChat, while an unsandboxed pipx protontricks (shared session) detects
 VRChat but cannot start while it runs.
 
+## Resolution (measured 2026-09-26)
+
+The crash is a **user-namespace boundary**, not the environment. VRChat's
+wineserver runs inside pressure-vessel's user namespace (`uid_map: 1000 1000 1`).
+Launching with VRChat's *exact* captured environment from the host still crashed
+identically; the wineserver simply cannot read the memory of a process outside
+its user namespace, and `EnumProcessModules` is the first call that needs it.
+
+Unprivileged `nsenter -t <VRChat pid> -U -m --preserve-credentials` works (we own
+the namespace). From inside:
+
+| Check | Result |
+| :--- | :--- |
+| `wine tasklist` | `VRChat.exe` (pid 496) **and** `dotnet.exe` (VRCOSC) in one session |
+| wineservers on the host | 1 |
+| Velopack `Access denied` | 0 |
+| VRCOSC window | yes |
+| VRCOSC log | `Reading log file: ...output_log_2026-09-25_23-33-18.txt` (the live game log) |
+
+This is what the launcher now does when VRChat is running. When it is not, the
+protontricks path remains, and VRCOSC runs standalone in its own session.
+
+The two field reports are both explained: flatpak protontricks always yields a
+separate session (coexists, never detects); an unsandboxed protontricks can
+connect to the game's wineserver from outside its user namespace and dies in
+Velopack. Neither ever had VRChat detection.
+
 ## What this means for a separate prefix
 
 A separate prefix keeps OSC, OSCQuery and log/config reading — those cross freely,

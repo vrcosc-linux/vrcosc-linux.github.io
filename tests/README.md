@@ -47,7 +47,12 @@ The fake logs every invocation's argv **and** which environment variables
 survived into it, which is how the tests assert that the Steam Runtime scrubbing
 actually happens rather than just that the code looks right.
 
-Covered here: argument parsing, `--info` completing under failing probes, runtime
+`tests/fixtures/fake-nsenter` records the namespace request and runs the command
+in place, so `test-session-join.sh` can assert that a stand-in `VRChat.exe` (a
+renamed `sleep` carrying Proton's environment markers) is found, entered, and that
+Proton's wine is run inside with the game's environment — without a container.
+
+Covered here: session joining, argument parsing, `--info` completing under failing probes, runtime
 mode selection and flag mapping, environment scrubbing, .NET channel detection
 and verification, launcher generation and the launcher's own runtime behaviour,
 offline `--dry-run`.

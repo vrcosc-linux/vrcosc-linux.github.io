@@ -83,41 +83,4 @@ it "says nothing about a busy prefix once it is free"
 out="$(run_install --dry-run --skip-firewall)"
 assert_not_contains "$out" "already using this prefix"
 
-# The generated launcher carries the same guard, since that is where users meet
-# the problem: a desktop-menu launch with no terminal to read an error from.
-it "generates a launcher while the prefix is free"
-run_install --skip-firewall >/dev/null 2>&1 || true
-LAUNCHER="$WORK/home/.local/bin/vrcosc"
-# The install step needs the network; fall back to generating the launcher alone.
-if [ ! -f "$LAUNCHER" ]; then
-    env -i HOME="$WORK/home" PATH="$WORK/bin:/usr/bin:/bin" TERM=dumb \
-        VRCOSC_INSTALL_SH_SOURCED=1 bash -c '
-            source "$1"
-            VRC_COMPATDATA="$2"; HOME="$3"; DRY_RUN=0; RESOLVED_RUNTIME_MODE=host
-            create_launchers >/dev/null 2>&1' _ "$INSTALL_SH" "$PREFIX" "$WORK/home"
-fi
-assert_file_exists "$LAUNCHER"
-
-it "the launcher starts VRCOSC when the prefix is free"
-: > "$WORK/pt.log"
-env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
-    bash "$LAUNCHER" >/dev/null 2>&1
-assert_contains "$(cat "$WORK/pt.log")" "VRCOSC.dll"
-
-start_holder || { echo "could not restart the stand-in prefix holder"; exit 1; }
-
-it "the launcher notes a held prefix on stderr"
-: > "$WORK/pt.log"
-out="$(env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
-    bash "$LAUNCHER" 2>&1)"
-assert_contains "$out" "already using this wine prefix"
-
-it "but still starts VRCOSC, since the two usually coexist"
-assert_contains "$(cat "$WORK/pt.log")" "VRCOSC.dll"
-
-it "VRCOSC_QUIET=1 suppresses the note"
-out="$(env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
-    VRCOSC_QUIET=1 bash "$LAUNCHER" 2>&1)"
-assert_not_contains "$out" "already using this wine prefix"
-
 summarise

@@ -217,6 +217,10 @@ check_dependencies() {
         log_error "Error: The following required dependencies are missing: ${missing[*]}"
         exit 1
     fi
+
+    if ! command -v nsenter &>/dev/null; then
+        log_warn "nsenter (util-linux) not found: VRCOSC will run in its own wine session and will not see VRChat."
+    fi
 }
 
 # --- Proton / Steam Runtime Environment Hygiene ---
@@ -365,6 +369,47 @@ get_prefix_proton_dir() {
     [ -n "$fonts_dir" ] || return 1
     fonts_dir="${fonts_dir%/}"                       # .../files/share/fonts
     echo "$(dirname "$(dirname "$(dirname "$fonts_dir")")")"
+}
+
+# The pid of a running VRChat.exe that owns this prefix inside Steam's
+# pressure-vessel container, or nothing.
+#
+# Steam runs the game inside its own user+mount namespace. A wine process
+# started from the host cannot usefully join that wineserver: it does connect,
+# but the wineserver cannot read a process outside its user namespace, so the
+# first module query -- Velopack's GetCurrentProcessPath() -- fails with
+# "Access denied" and VRCOSC dies before it has a window. Entering the game's
+# namespaces first (nsenter -U -m, allowed unprivileged because we own them)
+# puts VRCOSC in the same wine session as VRChat: same process table, same named
+# pipes, same windows, which is what VRChatClient needs to ever report the game
+# as open.
+find_vrchat_container_pid() {
+    local pfx="$VRC_COMPATDATA/pfx"
+    local proc
+    for proc in /proc/[0-9]*; do
+        [ "$(cat "$proc/comm" 2>/dev/null)" = "VRChat.exe" ] || continue
+        [ -r "$proc/environ" ] || continue
+        tr '\0' '\n' < "$proc/environ" 2>/dev/null \
+            | grep -qxF -e "WINEPREFIX=$pfx" -e "WINEPREFIX=$pfx/" || continue
+        tr '\0' '\n' < "$proc/environ" 2>/dev/null | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
+        echo "${proc#/proc/}"
+        return 0
+    done
+    return 1
+}
+
+# Writes VRChat's own environment as a sourceable file, so a joining process
+# runs with exactly Proton's settings (WINEDLLOVERRIDES, esync/fsync, paths).
+# Per-process loader state is dropped; so is anything that is not a valid shell
+# identifier, since some launchers export odd keys.
+write_session_env_file() {
+    local pid="$1" out="$2"
+    tr '\0' '\n' < "/proc/$pid/environ" \
+        | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+        | grep -vE '^(WINELOADERNOEXEC|WINEPRELOADRESERVE|WINEDEBUG|_|PWD|OLDPWD|SHLVL)=' \
+        | while IFS= read -r line; do
+            printf 'export %s=%q\n' "${line%%=*}" "${line#*=}"
+        done > "$out"
 }
 
 # The Steam Runtime app id a Proton build demands, if it declares one. A build
@@ -623,6 +668,17 @@ show_diagnostics() {
             echo -e "    ${YELLOW}such as 'Fontconfig error: /etc/fonts/fonts.conf: out of memory'.${NC}"
         else
             echo -e "  * Leaked Runtime Vars:   ${GREEN}None${NC}"
+        fi
+
+        local vrc_pid
+        if vrc_pid="$(find_vrchat_container_pid)"; then
+            if command -v nsenter &>/dev/null; then
+                echo -e "  * VRChat Session:        ${GREEN}Running in Steam's container (pid ${vrc_pid}); launcher will join it${NC}"
+            else
+                echo -e "  * VRChat Session:        ${YELLOW}Running (pid ${vrc_pid}) but nsenter is missing; cannot join it${NC}"
+            fi
+        else
+            echo -e "  * VRChat Session:        ${CYAN}Not running (VRCOSC will start a session of its own)${NC}"
         fi
 
         local holders
@@ -1155,20 +1211,60 @@ set -euo pipefail
 
 ENTRY="$win_entry"
 DOTNET="C:/Program Files/dotnet/dotnet.exe"
-PFX="$VRC_COMPATDATA/pfx"
+COMPATDATA="$VRC_COMPATDATA"
+PFX="\$COMPATDATA/pfx"
 
-# Report, but do not block on, another wine session holding this prefix: it
-# usually works, and when it does not the failure is a Velopack "Access denied"
-# crash that this note explains.
-if [ "\${VRCOSC_QUIET:-0}" != "1" ]; then
+# --- Preferred path: join VRChat's own wine session ---------------------------
+# Steam runs VRChat inside a user+mount namespace with its own wineserver. A
+# VRCOSC started outside it lands in a separate wine session (or, if it does
+# connect, dies in Velopack with "Access denied"), and can never see VRChat.exe,
+# its named pipes or its windows. Entering the game's namespaces first puts
+# VRCOSC in the same session. Set VRCOSC_JOIN=0 to skip this.
+find_vrchat_pid() {
+    local proc
     for proc in /proc/[0-9]*; do
+        [ "\$(cat "\$proc/comm" 2>/dev/null)" = "VRChat.exe" ] || continue
         [ -r "\$proc/environ" ] || continue
-        if tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null \
-            | grep -qxF -e "WINEPREFIX=\$PFX" -e "WINEPREFIX=\$PFX/"; then
-            echo "VRCOSC: note: \$(cat "\$proc/comm" 2>/dev/null) (\${proc#/proc/}) is already using this wine prefix." >&2
-            echo "VRCOSC: if VRCOSC now dies with 'Access denied' in Velopack, close VRChat first." >&2
-        fi
+        tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null \\
+            | grep -qxF -e "WINEPREFIX=\$PFX" -e "WINEPREFIX=\$PFX/" || continue
+        tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
+        echo "\${proc#/proc/}"
+        return 0
     done
+    return 1
+}
+
+# Proton's wine for this prefix: config_info line 2 is <proton>/files/share/fonts/.
+proton_wine() {
+    local fonts
+    fonts="\$(sed -n '2p' "\$COMPATDATA/config_info" 2>/dev/null)" || return 1
+    fonts="\${fonts%/}"
+    echo "\$(dirname "\$(dirname "\$fonts")")/bin/wine"
+}
+
+if [ "\${VRCOSC_JOIN:-1}" != "0" ] && command -v nsenter >/dev/null && vrc_pid="\$(find_vrchat_pid)"; then
+    wine="\$(proton_wine)"
+    if [ -n "\$wine" ] && [ -x "\$wine" ]; then
+        envfile="\$(mktemp)"
+        tr '\\0' '\\n' < "/proc/\$vrc_pid/environ" \\
+            | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \\
+            | grep -vE '^(WINELOADERNOEXEC|WINEPRELOADRESERVE|WINEDEBUG|_|PWD|OLDPWD|SHLVL)=' \\
+            | while IFS= read -r line; do printf 'export %s=%q\\n' "\${line%%=*}" "\${line#*=}"; done > "\$envfile"
+        echo "VRCOSC: joining VRChat's wine session (pid \$vrc_pid)" >&2
+        exec nsenter -t "\$vrc_pid" -U -m --preserve-credentials env -i bash -c \\
+            'source "\$1"; rm -f "\$1"; export WINEDEBUG=-all; exec "\$2" "\$3" "\$4" "\${@:5}"' \\
+            _ "\$envfile" "\$wine" "\$DOTNET" "\$ENTRY" "\$@"
+    fi
+    echo "VRCOSC: VRChat is running but its Proton wine was not found; falling back to protontricks." >&2
+fi
+
+# --- Fallback: own wine session via protontricks ------------------------------
+# Used when VRChat is not running. VRCOSC works standalone here, but it will not
+# see VRChat if the game is started afterwards -- start VRChat first for full
+# integration, then VRCOSC.
+if [ -z "\${vrc_pid:-}" ]; then
+    echo "VRCOSC: VRChat is not running; starting VRCOSC in its own wine session." >&2
+    echo "VRCOSC: for VRChat detection, start VRChat first, then VRCOSC." >&2
 fi
 
 # Drop Steam Runtime variables leaked in by the calling shell. With them set,
