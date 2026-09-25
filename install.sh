@@ -1575,15 +1575,23 @@ restore_vrchat_launch_bridge() {
 }
 
 uninstall_vrcosc() {
-    log_warn "Starting VRCOSC uninstallation..."
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log_warn "Simulating VRCOSC uninstallation (--dry-run; nothing will be removed)..."
+    else
+        log_warn "Starting VRCOSC uninstallation..."
+    fi
     locate_vrchat_prefix
 
     local removed=0
     # Remove installation directories
     for dir in "$(get_vrcosc_install_dir live)" "$(get_vrcosc_install_dir beta)"; do
         if [ -d "$dir" ]; then
-            log_info "Removing binaries: $dir"
-            rm -rf "$dir"
+            if [ "$DRY_RUN" -eq 1 ]; then
+                log_info "Would remove binaries: $dir"
+            else
+                log_info "Removing binaries: $dir"
+                rm -rf "$dir"
+            fi
             removed=1
         fi
     done
@@ -1591,8 +1599,12 @@ uninstall_vrcosc() {
     # Remove launchers, shortcuts, and icon
     for f in $(get_all_installed_files); do
         if [ -f "$f" ]; then
-            log_info "Removing file: $f"
-            rm -f "$f"
+            if [ "$DRY_RUN" -eq 1 ]; then
+                log_info "Would remove file: $f"
+            else
+                log_info "Removing file: $f"
+                rm -f "$f"
+            fi
             removed=1
         fi
     done
@@ -1601,11 +1613,20 @@ uninstall_vrcosc() {
     restore_vrchat_launch_bridge && removed=1
     local cache
     cache="$(get_launch_bridge_cache)"
-    if [ -f "$cache" ] && [ "$DRY_RUN" -ne 1 ]; then
-        log_info "Removing cached bridge payload: $cache"
-        rm -f "$cache"
-        rmdir "$(dirname "$cache")" 2>/dev/null || true
+    if [ -f "$cache" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_info "Would remove cached bridge payload: $cache"
+        else
+            log_info "Removing cached bridge payload: $cache"
+            rm -f "$cache"
+            rmdir "$(dirname "$cache")" 2>/dev/null || true
+        fi
         removed=1
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log_info "Dry run complete; nothing was removed."
+        return 0
     fi
 
     if [ "$removed" -eq 1 ]; then

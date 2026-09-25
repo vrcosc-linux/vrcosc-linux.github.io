@@ -306,4 +306,38 @@ assert_eq "1" "$([ -e "$(get_launch_bridge_cache)" ] && echo 0 || echo 1)"
 it "and so is the launcher script"
 assert_eq "1" "$([ -e "$(get_launcher_script)" ] && echo 0 || echo 1)"
 
+# --- --uninstall --dry-run must not uninstall ----------------------------------
+# It used to: uninstall_vrcosc never looked at DRY_RUN, so a "simulated"
+# uninstall deleted the install directory, the launcher, the desktop entry and
+# the icon for real. This cost a real user their installed build.
+it "a dry-run uninstall keeps the install directory"
+fresh_prefix dry1
+app_dir="$(get_vrcosc_install_dir)"
+mkdir -p "$app_dir"; printf 'app\n' > "$app_dir/VRCOSC.dll"
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+PATH="$WORK/bin:$PATH" create_launchers >/dev/null 2>&1
+DRY_RUN=1
+out="$(PATH="$WORK/bin:$PATH" uninstall_vrcosc 2>&1)"
+DRY_RUN=0
+assert_file_exists "$app_dir/VRCOSC.dll"
+
+it "and keeps the launcher script"
+assert_file_exists "$(get_launcher_script)"
+
+it "and keeps the desktop entry"
+assert_file_exists "$(get_desktop_file)"
+
+it "and keeps the patched launch.exe"
+assert_file_exists "$game_dir/launch.org.exe"
+
+it "and keeps the cached bridge payload"
+assert_file_exists "$(get_launch_bridge_cache)"
+
+it "and says it removed nothing"
+assert_contains "$out" "nothing was removed"
+
+it "while a real uninstall does remove the install directory"
+PATH="$WORK/bin:$PATH" uninstall_vrcosc >/dev/null 2>&1
+assert_eq "1" "$([ -e "$app_dir/VRCOSC.dll" ] && echo 0 || echo 1)"
+
 summarise
