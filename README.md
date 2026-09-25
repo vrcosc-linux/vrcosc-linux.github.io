@@ -10,7 +10,11 @@ This installer configures VRCOSC to run seamlessly by:
 1. **Auto-detecting your VRChat Proton prefix** across multiple internal, secondary, and external storage drives (`libraryfolders.vdf`), with an interactive prompt fallback.
 2. **Applying the WPF registry patch** to disable Direct3D acceleration, completely eliminating the black window / invisible context menu rendering bug under Wine/Proton.
 3. **Silently provisioning .NET 10.0 Desktop Runtime** directly inside VRChat's Proton prefix (skips download if already installed).
-4. **Installing VRCOSC binaries** into the prefix's AppData directory.
+4. **Installing VRCOSC binaries** into the prefix's AppData directory. The install
+   directory is replaced wholesale, so the installer first compares the installed
+   version against the release it would fetch and declines to downgrade or to
+   reinstall the same version — useful if you build VRCOSC yourself ahead of the
+   published release. `-f/--force` overrides.
 5. **Configuring firewall rules** for OSC/OSCQuery ports (9000, 9001, 5353 UDP).
 6. **Patching VRChat's `launch.exe` with a Linux IPC Named-Pipe Bridge**:
    - VRChat ships a Windows launcher (`launch.exe`) that fails under Proton when companion tools (like VRCX or external launchers) request in-game world/instance navigation via `\\.\pipe\VRChatURLLaunchPipe`.
@@ -50,7 +54,7 @@ bash install.sh [OPTIONS]
 | :--- | :--- |
 | `-i, --info` | Display diagnostic system, prefix, runtime, VRCOSC, and VRChat IPC bridge details |
 | `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC configs & prefix registries to Desktop |
-| `-f, --force` | Force re-download and reinstall of .NET 10 and VRCOSC binaries |
+| `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
 | `--branch <live\|beta>` | Choose release channel (`live` or `beta`, defaults to `live`) |
 | `-u, --uninstall` | Cleanly remove VRCOSC binaries, launcher script, and desktop shortcut (preserves user settings) |
 | `--dry-run` | Simulate actions without modifying files or installing runtimes |

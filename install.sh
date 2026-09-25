@@ -111,6 +111,39 @@ github_api() {
         "${auth[@]}" "$url" 2>&1 || true
 }
 
+# Drops trailing ".0" components so the four-part version recorded in
+# VRCOSC.deps.json ("2026.812.0.0") compares equal to the three-part release tag
+# it came from ("2026.812.0").
+normalise_version() {
+    local v="$1"
+    while [ "$v" != "${v%.0}" ]; do
+        v="${v%.0}"
+    done
+    echo "$v"
+}
+
+# Echoes "newer", "older" or "same" for version $1 relative to $2.
+compare_versions() {
+    local a b highest
+    a="$(normalise_version "$1")"
+    b="$(normalise_version "$2")"
+
+    [ "$a" = "$b" ] && { echo "same"; return 0; }
+
+    highest="$(printf '%s\n%s\n' "$a" "$b" | sort -V | tail -n 1)"
+    if [ "$highest" = "$a" ]; then
+        echo "newer"
+    else
+        echo "older"
+    fi
+}
+
+# The version a release asset URL delivers, taken from the tag in its path:
+# .../releases/download/2026.807.0/VRCOSC-2026.807.0-live-full.nupkg
+get_version_from_asset_url() {
+    sed -n 's|.*/releases/download/\([^/]*\)/.*|\1|p' <<< "$1"
+}
+
 print_usage() {
     echo -e "${BOLD}VRCOSC Linux Installer & Manager${NC}"
     echo ""
@@ -1059,6 +1092,37 @@ install_vrcosc() {
             printf '%s\n' "$latest_release_json" | head -n 5 | sed 's/^/  /'
         fi
         exit 1
+    fi
+
+    # Do not clobber a newer local build. The maintainer routinely runs a build
+    # ahead of the published release, and this function deletes the install
+    # directory before unpacking, so an unconditional install is a downgrade.
+    local remote_version local_version
+    remote_version="$(get_version_from_asset_url "$nupkg_url")"
+    local_version="$(get_vrcosc_version_from_dir "$(get_vrcosc_install_dir)")"
+
+    if [ "$FORCE_INSTALL" -ne 1 ] && [ -n "$remote_version" ]; then
+        case "$local_version" in
+            "Not installed")
+                : # nothing there yet
+                ;;
+            "Installed")
+                log_warn "Installed VRCOSC has no readable version (no VRCOSC.deps.json); reinstalling $remote_version."
+                ;;
+            *)
+                case "$(compare_versions "$local_version" "$remote_version")" in
+                    same)
+                        log_success "VRCOSC $local_version is already the latest $VRCOSC_BRANCH release. Skipping download (use -f/--force to reinstall)."
+                        return 0
+                        ;;
+                    newer)
+                        log_warn "Installed VRCOSC $local_version is newer than the latest $VRCOSC_BRANCH release ($remote_version); not downgrading."
+                        echo -e "Use ${CYAN}-f/--force${NC} to install ${remote_version} over it anyway."
+                        return 0
+                        ;;
+                esac
+                ;;
+        esac
     fi
 
     log_info "Downloading VRCOSC package from: $nupkg_url"
