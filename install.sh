@@ -392,13 +392,21 @@ locate_vrchat_prefix() {
 }
 
 show_diagnostics() {
+    # Diagnostics are best-effort by nature: a probe that fails is itself a
+    # finding, so nothing in here may abort the report. Without this, a single
+    # non-zero `protontricks --version` (or any grep that matches nothing, under
+    # `set -o pipefail`) tripped the ERR trap and truncated the output at
+    # whichever section happened to be printing.
+    set +e
+    trap - ERR
+
     log_info "Collecting diagnostic and environment information..."
     echo ""
 
     # System & OS Information
     echo -e "${BOLD}=== System & OS Environment ===${NC}"
     local os_pretty="Unknown"
-    [ -f /etc/os-release ] && os_pretty="$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d'=' -f2- | tr -d '"')"
+    [ -f /etc/os-release ] && os_pretty="$(grep -E '^PRETTY_NAME=' /etc/os-release | cut -d'=' -f2- | tr -d '"' || true)"
     local kernel_ver="$(uname -r 2>/dev/null || echo 'Unknown')"
     local arch="$(uname -m 2>/dev/null || echo 'Unknown')"
     local de="${XDG_CURRENT_DESKTOP:-Unknown}"
@@ -414,14 +422,14 @@ show_diagnostics() {
     echo ""
     echo -e "${BOLD}=== Tooling & Runtime Dependencies ===${NC}"
     local pt_ver="Not installed"
-    command -v protontricks &>/dev/null && pt_ver="$(protontricks --version 2>&1 | head -n 1)"
+    command -v protontricks &>/dev/null && pt_ver="$(protontricks --version 2>&1 | grep -vi 'warning\|deprecat' | head -n 1 || true)"
     local curl_ver="Not installed"
-    command -v curl &>/dev/null && curl_ver="$(curl --version 2>&1 | head -n 1 | awk '{print $1, $2}')"
+    command -v curl &>/dev/null && curl_ver="$(curl --version 2>&1 | head -n 1 | awk '{print $1, $2}' || true)"
     local unzip_ver="Not installed"
-    command -v unzip &>/dev/null && unzip_ver="Installed ($(which unzip))"
+    command -v unzip &>/dev/null && unzip_ver="Installed ($(command -v unzip || true))"
     local archiver="tar/xz"
     if command -v 7z &>/dev/null; then
-        local z7_ver="$(7z 2>&1 | grep -i '7-Zip' | head -n 1 | awk '{print $2}')"
+        local z7_ver="$(7z 2>&1 | grep -i '7-Zip' | head -n 1 | awk '{print $2}' || true)"
         archiver="7z (${z7_ver:-installed})"
     fi
 
