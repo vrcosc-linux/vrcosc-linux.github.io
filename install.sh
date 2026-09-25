@@ -312,21 +312,22 @@ get_prefix_holders() {
     return 0
 }
 
-# Reports when another wine session already holds this prefix.
+# Notes when a wine session other than VRChat's is using this prefix.
 #
-# This is a warning, not a refusal: verified on a live system, VRCOSC and VRChat
-# do run at the same time in one prefix, so blocking would break working setups.
-# But when a launch does fail this is nearly always why, so name the symptom.
+# VRChat itself holding the prefix is normal and expected -- the launcher joins
+# that session on purpose. A different session (a VRCOSC already running under
+# protontricks, say) is worth mentioning before we write into the prefix.
 warn_if_prefix_busy() {
-    local holders
+    local holders others
     holders="$(get_prefix_holders)"
     [ -n "$holders" ] || return 0
 
-    log_warn "Another wine session is already using this prefix:"
-    printf '%s\n' "$holders" | sed 's/^/  * /'
-    echo -e "${YELLOW}This usually still works. If VRCOSC instead dies with${NC}"
-    echo -e "  ${CYAN}System.ComponentModel.Win32Exception (5): Access denied${NC} in Velopack,"
-    echo -e "${YELLOW}close VRChat, wait for wineserver to exit, and try again.${NC}"
+    find_vrchat_container_pid >/dev/null 2>&1 && return 0
+
+    others="$(printf '%s' "$holders" | awk '{print $2}' | sort -u | tr '\n' ' ')"
+    log_warn "Wine processes are already running in this prefix: ${others}"
+    echo -e "${YELLOW}Installing should still work. If VRCOSC later fails to start, close it${NC}"
+    echo -e "${YELLOW}and VRChat, wait for wineserver to exit, and run the installer again.${NC}"
 }
 
 # Runtime modes tried by "auto", in order. no-bwrap first so hosts that already
@@ -681,15 +682,13 @@ show_diagnostics() {
             echo -e "  * VRChat Session:        ${CYAN}Not running (VRCOSC will start a session of its own)${NC}"
         fi
 
-        local holders
+        local holders holder_count
         holders="$(get_prefix_holders)"
-        if [ -n "$holders" ]; then
-            echo -e "  * Prefix In Use By:      ${RED}$(printf '%s' "$holders" | tr '\n' ',' | sed 's/,$//')${NC}"
-            echo -e "    ${YELLOW}Usually harmless, but if VRCOSC dies with 'Access denied' in Velopack,${NC}"
-            echo -e "    ${YELLOW}this is why. The runtime probes below are also less reliable while a${NC}"
-            echo -e "    ${YELLOW}session is active -- close VRChat and re-run --info for a clean read.${NC}"
+        holder_count="$(printf '%s' "$holders" | grep -c . || true)"
+        if [ "$holder_count" -gt 0 ]; then
+            echo -e "  * Wine Processes In Prefix: ${CYAN}${holder_count}${NC} ($(printf '%s' "$holders" | awk '{print $2}' | sort -u | head -n 4 | tr '\n' ' ')...)"
         else
-            echo -e "  * Prefix In Use By:      ${GREEN}Nothing (free)${NC}"
+            echo -e "  * Wine Processes In Prefix: ${GREEN}None (prefix idle)${NC}"
         fi
 
         local candidate result

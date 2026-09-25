@@ -46,23 +46,19 @@ stop_holder() {
     HOLDER_PID=""
 }
 
-it "reports no holder for an idle prefix"
+it "reports an idle prefix as idle"
 out="$(run_install --info)"
-assert_contains "$out" "Nothing (free)"
+assert_contains "$out" "None (prefix idle)"
 
 start_holder || { echo "could not start a stand-in prefix holder"; exit 1; }
 
-it "--info names the process holding the prefix"
+it "--info counts the wine processes in the prefix"
 out="$(run_install --info)"
-assert_contains "$out" "Prefix In Use By"
-it "--info explains what a held prefix means for VRCOSC"
-assert_contains "$out" "Access denied"
+assert_contains "$out" "Wine Processes In Prefix"
 
-it "the installer warns about a held prefix but does not refuse"
+it "the installer warns about a non-VRChat session but does not refuse"
 out="$(run_install --dry-run --skip-firewall)"
-assert_contains "$out" "already using this prefix"
-it "and names the Velopack symptom to look for"
-assert_contains "$out" "Access denied"
+assert_contains "$out" "already running in this prefix"
 
 it "detects a holder that spells WINEPREFIX with a trailing slash, as Proton does"
 # Proton exports WINEPREFIX=<path>/ ; protontricks exports it without the slash.
@@ -75,12 +71,12 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.2
 done
 out="$(run_install --dry-run --skip-firewall)"
-assert_contains "$out" "already using this prefix"
+assert_contains "$out" "already running in this prefix"
 
 stop_holder
 
 it "says nothing about a busy prefix once it is free"
 out="$(run_install --dry-run --skip-firewall)"
-assert_not_contains "$out" "already using this prefix"
+assert_not_contains "$out" "already running in this prefix"
 
 summarise
