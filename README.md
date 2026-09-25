@@ -26,10 +26,11 @@ This installer configures VRCOSC to run seamlessly by:
    reinstall the same version — useful if you build VRCOSC yourself ahead of the
    published release. `-f/--force` overrides.
 5. **Configuring firewall rules** for OSC/OSCQuery ports (9000, 9001, 5353 UDP).
-6. **Patching VRChat's `launch.exe` with a Linux IPC Named-Pipe Bridge**:
+6. **Optionally patching VRChat's `launch.exe` with a Linux IPC Named-Pipe Bridge** (`--patch`):
    - VRChat ships a Windows launcher (`launch.exe`) that fails under Proton when companion tools (like VRCX or external launchers) request in-game world/instance navigation via `\\.\pipe\VRChatURLLaunchPipe`.
+   - This one is off by default, because it replaces a file inside VRChat's own install directory. Everything else works without it; only `vrchat://` navigation needs it.
    - The installer creates a read-only backup (`launch.org.exe`, `chmod 444`) and places a drop-in C# replacement bridge (`launch.exe`, `chmod 555`). The bridge binary ships in `bin/`; a piped install, which has no script directory, downloads it instead and caches it under `~/.local/share/vrcosc-linux`.
-   - Steam restores the stock `launch.exe` on game updates and file validation, so the `vrcosc` launcher re-applies the patch before every session rather than leaving it to decay until the next install.
+   - Steam restores the stock `launch.exe` on game updates and file validation, so when you have opted in, the `vrcosc` launcher re-applies the patch before every session rather than leaving it to decay until the next install.
    - The bridge writes to VRChat's named pipe to open in-game world menus in real
      time, falling back to the original binary if VRChat isn't running. Wine named
      pipes belong to a single wine session, so this only works from inside VRChat's
@@ -77,6 +78,7 @@ bash install.sh [OPTIONS]
 | `-u, --uninstall` | Cleanly remove VRCOSC binaries, launcher script, and desktop shortcut (preserves user settings) |
 | `--dry-run` | Simulate actions without modifying files or installing runtimes |
 | `--skip-firewall` | Skip firewall inspection and rule generation |
+| `--patch` | Replace VRChat's `launch.exe` with the IPC bridge, enabling `vrchat://` navigation. Off by default, since it modifies VRChat's install directory. `--path` is accepted as an alias |
 | `--prefix <PATH>` | Explicitly supply your custom VRChat compatdata/438100 path |
 | `--runtime <MODE>` | How wine is invoked: `auto` (default, probes and picks a working mode), `no-bwrap`, `host` (no Steam Runtime), `container` (Steam Runtime with bwrap) |
 | `-h, --help` | Show command usage and options |

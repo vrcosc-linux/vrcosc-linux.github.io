@@ -13,6 +13,7 @@ mkdir -p "$WORK/bin"
 HOME="$WORK/home"
 LAUNCH_BRIDGE_CACHE="$HOME/.local/share/vrcosc-linux/vrc-launch-bridge.exe"
 DRY_RUN=0
+PATCH_LAUNCH=1   # the opt-in default is covered by its own tests at the end
 
 # A fake curl, so nothing here touches the network.
 make_curl() {
@@ -191,5 +192,51 @@ env PATH="$WORK/nocmp:$WORK/bin:/usr/bin:/bin" VRCOSC_JOIN=0 \
 env PATH="$WORK/nocmp:$WORK/bin:/usr/bin:/bin" VRCOSC_JOIN=0 \
     bash "$launcher" >/dev/null 2>"$WORK/launch.err"
 assert_not_contains "$(cat "$WORK/launch.err")" "re-applied"
+
+# --- patching is opt-in -------------------------------------------------------
+# It writes into VRChat's own install directory, so it happens only on request.
+PATCH_LAUNCH=0
+VRC_COMPATDATA="$("$FIXTURES/make-prefix.sh" --root "$WORK/steam3")"
+game_dir="$(get_vrchat_game_dir)"
+
+it "leaves launch.exe alone without --patch"
+out="$(PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge 2>&1)"
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.exe")"
+
+it "and says how to enable it"
+assert_contains "$out" "--patch"
+
+it "makes no backup it did not need"
+assert_eq "1" "$([ -e "$game_dir/launch.org.exe" ] && echo 0 || echo 1)"
+
+it "generates a launcher with no payload to re-patch from"
+PATH="$WORK/bin:$PATH" create_launchers >/dev/null 2>&1
+assert_contains "$(cat "$(get_launcher_script)")" 'BRIDGE_PAYLOAD=""'
+
+it "and that launcher does not touch launch.exe"
+env PATH="$WORK/bin:/usr/bin:/bin" VRCOSC_JOIN=0 \
+    bash "$(get_launcher_script)" >/dev/null 2>"$WORK/launch.err"
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.exe")"
+
+it "and still starts VRCOSC"
+assert_not_contains "$(cat "$WORK/launch.err")" "re-applied"
+
+it "patches once --patch is given"
+PATCH_LAUNCH=1
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+assert_eq "$(cat "$(get_launch_bridge_cache)")" "$(cat "$game_dir/launch.exe")"
+
+# --patch and --path are the same switch, so a user who types either gets it.
+it "--patch turns patching on"
+( PATCH_LAUNCH=0; parse_arguments --patch; [ "$PATCH_LAUNCH" -eq 1 ] )
+assert_ok "$?"
+
+it "--path is accepted as an alias"
+( PATCH_LAUNCH=0; parse_arguments --path; [ "$PATCH_LAUNCH" -eq 1 ] )
+assert_ok "$?"
+
+it "neither flag leaves patching off"
+( PATCH_LAUNCH=0; parse_arguments --skip-firewall; [ "$PATCH_LAUNCH" -eq 0 ] )
+assert_ok "$?"
 
 summarise

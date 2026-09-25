@@ -32,6 +32,7 @@ BACKUP_MODE=0
 INFO_MODE=0
 DRY_RUN=0
 SKIP_FIREWALL=0
+PATCH_LAUNCH=0            # patching VRChat's launch.exe is opt-in; see --patch
 VRC_COMPATDATA=""
 RUNTIME_MODE="auto"        # auto | no-bwrap | host | container
 RESOLVED_RUNTIME_MODE=""   # filled in by probe_runtime_mode()
@@ -244,6 +245,10 @@ print_usage() {
     echo "  -u, --uninstall           Uninstall VRCOSC binaries, launcher script, and desktop shortcut"
     echo "      --dry-run             Simulate actions without writing files or running installers"
     echo "      --skip-firewall       Do not attempt firewall port configuration"
+    echo "      --patch               Replace VRChat's launch.exe with the Linux IPC bridge,"
+    echo "                            enabling vrchat:// navigation from VRCOSC and other tools."
+    echo "                            Off by default: it modifies files in VRChat's own install"
+    echo "                            directory. (--path is accepted as an alias.)"
     echo "      --prefix <PATH>       Explicitly specify the VRChat compatdata/438100 folder"
     echo "      --runtime <MODE>      Steam Runtime mode for wine calls (default: auto)"
     echo "                              auto       probe modes below and use the first clean one"
@@ -308,6 +313,10 @@ parse_arguments() {
                 ;;
             --skip-firewall)
                 SKIP_FIREWALL=1
+                shift
+                ;;
+            --patch|--path)
+                PATCH_LAUNCH=1
                 shift
                 ;;
             -h|--help)
@@ -891,7 +900,7 @@ show_diagnostics() {
     if [ -n "$source_bridge" ] && files_identical "$source_bridge" "$target_launch"; then
         bridge_status="${GREEN}Patched (Linux IPC Named-Pipe Bridge)${NC}"
     elif [ -f "$target_launch" ]; then
-        bridge_status="${YELLOW}Stock launch.exe (Unpatched)${NC}"
+        bridge_status="${YELLOW}Stock launch.exe (Unpatched; enable with --patch)${NC}"
     fi
     echo -e "  * VRChat Launch Bridge:    ${bridge_status}"
 
@@ -1308,6 +1317,13 @@ stage_launch_bridge() {
 }
 
 patch_vrchat_launch_bridge() {
+    # Opt-in: this writes into VRChat's own install directory, which not everyone
+    # wants touched, and the game works fine without it -- only vrchat://
+    # navigation from VRCOSC and companion tools depends on the bridge.
+    if [ "$PATCH_LAUNCH" -ne 1 ]; then
+        log_info "Leaving VRChat's launch.exe alone (pass --patch to install the IPC bridge)."
+        return 0
+    fi
     log_info "Checking VRChat launch.exe for Linux IPC named-pipe bridge patch..."
     [ "$DRY_RUN" -eq 1 ] && return 0
 
@@ -1366,8 +1382,9 @@ create_launchers() {
     fi
 
     mkdir -p "$(dirname "$launch_script")"
-    local bridge_payload
-    bridge_payload="$(stage_launch_bridge)"
+    # Empty unless --patch was given, which makes the launcher's re-patch a no-op.
+    local bridge_payload=""
+    [ "$PATCH_LAUNCH" -eq 1 ] && bridge_payload="$(stage_launch_bridge)"
     local vrc_game_dir
     vrc_game_dir="$(get_vrchat_game_dir)"
     local runtime_flags

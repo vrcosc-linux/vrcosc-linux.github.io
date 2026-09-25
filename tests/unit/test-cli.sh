@@ -34,6 +34,9 @@ it "--help exits successfully and documents --runtime"
 out="$(run_install --help)"; rc=$?
 assert_contains "$out$rc" "--runtime <MODE>"
 
+it "--help documents that launch.exe patching is opt-in"
+assert_contains "$out" "--patch"
+
 it "rejects an unknown --runtime value"
 out="$(run_install --runtime nonsense)"; rc=$?
 assert_fails $rc
