@@ -132,4 +132,37 @@ env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" VRCOSC_JOIN=0 \
     bash "$launcher" >/dev/null 2>&1
 assert_contains "$(cat "$WORK/pt.log")" "VRCOSC.dll"
 
+# --- hosts without diffutils --------------------------------------------------
+# Minimal Fedora and Arch images have no cmp(1). A missing cmp used to read as
+# "the files differ", so the bridge looked permanently unpatched and both the
+# installer and the launcher rewrote launch.exe on every single run.
+mkdir -p "$WORK/nocmp"
+printf '#!/bin/sh\nexit 127\n' > "$WORK/nocmp/cmp"
+chmod +x "$WORK/nocmp/cmp"
+printf 'same\n' > "$WORK/a"; printf 'same\n' > "$WORK/b"; printf 'other\n' > "$WORK/c"
+
+it "sees identical files as identical without cmp"
+PATH="$WORK/nocmp:$PATH" files_identical "$WORK/a" "$WORK/b"
+assert_ok "$?"
+
+it "still sees differing files as different without cmp"
+PATH="$WORK/nocmp:$PATH" files_identical "$WORK/a" "$WORK/c"
+assert_fails "$?"
+
+it "treats a missing file as not identical"
+files_identical "$WORK/a" "$WORK/does-not-exist"
+assert_fails "$?"
+
+it "the launcher does not re-patch on a host without cmp"
+VRC_COMPATDATA="$("$FIXTURES/make-prefix.sh" --root "$WORK/steam2")"
+game_dir="$(get_vrchat_game_dir)"
+PATH="$WORK/bin:$PATH" create_launchers >/dev/null 2>&1
+launcher="$(get_launcher_script)"
+env PATH="$WORK/nocmp:$WORK/bin:/usr/bin:/bin" VRCOSC_JOIN=0 \
+    bash "$launcher" >/dev/null 2>&1
+: > "$WORK/launch.err"
+env PATH="$WORK/nocmp:$WORK/bin:/usr/bin:/bin" VRCOSC_JOIN=0 \
+    bash "$launcher" >/dev/null 2>"$WORK/launch.err"
+assert_not_contains "$(cat "$WORK/launch.err")" "re-applied"
+
 summarise

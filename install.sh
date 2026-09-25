@@ -77,6 +77,26 @@ get_vrchat_game_dir() {
 # Directory install.sh itself lives in, or empty when there is no script file --
 # which is the normal case for the documented `curl ... | bash` install, where
 # BASH_SOURCE is "bash" and a naive dirname silently yields the caller's cwd.
+# True when two files have identical contents. cmp(1) comes from diffutils, which
+# minimal Fedora and Arch installs do not ship -- and a missing cmp reads as
+# "differs", which made the bridge look unpatched forever and re-patch on every
+# run. Falls back to a checksum, then to size.
+files_identical() {
+    local a="$1" b="$2"
+    [ -f "$a" ] && [ -f "$b" ] || return 1
+    # cmp answers 0 for identical and 1 for differing; any other status means it
+    # could not do the job (127 when it is not installed at all), so fall through
+    # rather than reporting a difference that was never measured.
+    local rc=0
+    cmp -s "$a" "$b" 2>/dev/null || rc=$?
+    [ "$rc" -le 1 ] && return "$rc"
+    if command -v sha256sum >/dev/null 2>&1; then
+        [ "$(sha256sum < "$a")" = "$(sha256sum < "$b")" ]
+        return $?
+    fi
+    [ "$(wc -c < "$a")" = "$(wc -c < "$b")" ]
+}
+
 # Where a downloaded bridge payload is kept between runs.
 get_launch_bridge_cache() {
     echo "$HOME/.local/share/vrcosc-linux/vrc-launch-bridge.exe"
@@ -860,7 +880,7 @@ show_diagnostics() {
     local source_bridge
     source_bridge="$(resolve_launch_bridge --no-download || true)"
     local bridge_status="${YELLOW}Unpatched / Missing${NC}"
-    if [ -f "$target_launch" ] && [ -n "$source_bridge" ] && cmp -s "$source_bridge" "$target_launch"; then
+    if [ -n "$source_bridge" ] && files_identical "$source_bridge" "$target_launch"; then
         bridge_status="${GREEN}Patched (Linux IPC Named-Pipe Bridge)${NC}"
     elif [ -f "$target_launch" ]; then
         bridge_status="${YELLOW}Stock launch.exe (Unpatched)${NC}"
@@ -1309,7 +1329,7 @@ patch_vrchat_launch_bridge() {
     fi
 
     # Compare checksum or size to see if already patched
-    if [ -f "$target_launch" ] && cmp -s "$source_bridge" "$target_launch"; then
+    if files_identical "$source_bridge" "$target_launch"; then
         log_success "VRChat launch.exe is already patched with the Linux IPC bridge."
         chmod 555 "$target_launch" 2>/dev/null || true
         return 0
@@ -1362,12 +1382,29 @@ BRIDGE_PAYLOAD="$bridge_payload"
 # validation, which silently breaks vrchat:// navigation until the installer is
 # run again. Re-apply the patch here instead, since this runs before every
 # session. Nothing is touched if the bridge is already in place.
+# cmp(1) is diffutils, which minimal Fedora and Arch installs omit; a missing cmp
+# would read as "differs" and re-patch on every launch.
+bridge_matches() {
+    [ -f "\$1" ] && [ -f "\$2" ] || return 1
+    # Only 0 (identical) and 1 (differ) are answers; anything else means cmp
+    # could not run, so fall through instead of assuming a difference.
+    local rc=0
+    cmp -s "\$1" "\$2" 2>/dev/null || rc=\$?
+    if [ "\$rc" -le 1 ]; then
+        return "\$rc"
+    elif command -v sha256sum >/dev/null 2>&1; then
+        [ "\$(sha256sum < "\$1")" = "\$(sha256sum < "\$2")" ]
+    else
+        [ "\$(wc -c < "\$1")" = "\$(wc -c < "\$2")" ]
+    fi
+}
+
 repatch_launch_bridge() {
     [ -n "\$BRIDGE_PAYLOAD" ] && [ -f "\$BRIDGE_PAYLOAD" ] || return 0
     local target="\$VRC_GAME_DIR/launch.exe"
     local backup="\$VRC_GAME_DIR/launch.org.exe"
     [ -d "\$VRC_GAME_DIR" ] || return 0
-    if cmp -s "\$BRIDGE_PAYLOAD" "\$target"; then
+    if bridge_matches "\$BRIDGE_PAYLOAD" "\$target"; then
         chmod 555 "\$target" 2>/dev/null || true
         return 0
     fi
