@@ -847,13 +847,20 @@ install_dotnet_runtime() {
     fi
 
     log_info "Fetching latest .NET ${channel} Desktop Runtime download URL..."
-    local dotnet_url
-    dotnet_url=$(curl -s "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${channel}/releases.json" \
-        | grep -o 'https://[^"]*windowsdesktop-runtime-[0-9.]*-win-x64.exe' | head -n 1)
+    local releases_json dotnet_url
+    releases_json="$(curl -fsS --connect-timeout 10 \
+        "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${channel}/releases.json" 2>&1 || true)"
+    dotnet_url="$(grep -o 'https://[^"]*windowsdesktop-runtime-[0-9.]*-win-x64.exe' <<< "$releases_json" \
+        | head -n 1 || true)"
 
     if [ -z "$dotnet_url" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_warn "Dry run: could not reach the .NET release metadata; skipping runtime install."
+            return 0
+        fi
         log_error "Error: Failed to fetch the .NET ${channel} Desktop Runtime download URL."
-        echo -e "${YELLOW}Check that channel ${channel} exists at https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${NC}"
+        echo -e "${YELLOW}Check your network, and that channel ${channel} exists at${NC}"
+        echo -e "  ${CYAN}https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${NC}"
         exit 1
     fi
 
@@ -893,20 +900,30 @@ verify_dotnet_runtime() {
 install_vrcosc() {
     log_info "Fetching latest VRCOSC release version (channel: $VRCOSC_BRANCH)..."
     local latest_release_json nupkg_url
-    latest_release_json=$(curl -s https://api.github.com/repos/VolcanicArts/VRCOSC/releases/latest)
+    latest_release_json="$(curl -fsS --connect-timeout 10 \
+        -H "User-Agent: vrcosc-installer" \
+        https://api.github.com/repos/VolcanicArts/VRCOSC/releases/latest 2>&1 || true)"
 
     local pkg_pattern="live-full.nupkg"
     [ "$VRCOSC_BRANCH" = "beta" ] && pkg_pattern="beta-full.nupkg"
 
-    nupkg_url=$(echo "$latest_release_json" | grep -o "https://github.com/VolcanicArts/VRCOSC/releases/download/[^\"]*${pkg_pattern}" | head -n 1)
+    nupkg_url="$(grep -o "https://github.com/VolcanicArts/VRCOSC/releases/download/[^\"]*${pkg_pattern}" \
+        <<< "$latest_release_json" | head -n 1 || true)"
 
     # Fallback to any full nupkg if channel-specific filename differs
     if [ -z "$nupkg_url" ]; then
-        nupkg_url=$(echo "$latest_release_json" | grep -o 'https://github.com/VolcanicArts/VRCOSC/releases/download/[^"]*-full.nupkg' | head -n 1)
+        nupkg_url="$(grep -o 'https://github.com/VolcanicArts/VRCOSC/releases/download/[^"]*-full.nupkg' \
+            <<< "$latest_release_json" | head -n 1 || true)"
     fi
 
     if [ -z "$nupkg_url" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_warn "Dry run: could not reach the GitHub releases API; skipping VRCOSC download."
+            return 0
+        fi
         log_error "Error: Failed to fetch the VRCOSC $VRCOSC_BRANCH package URL."
+        echo -e "${YELLOW}GitHub may be unreachable or rate-limiting this host. Response was:${NC}"
+        printf '%s\n' "$latest_release_json" | head -n 5 | sed 's/^/  /'
         exit 1
     fi
 
@@ -980,7 +997,11 @@ install_application_icon() {
 
     local icon_path="$(get_app_icon_path)"
     mkdir -p "$(dirname "$icon_path")"
-    curl -sL -o "$icon_path" "$ICON_URL" || true
+    curl -fsSL --connect-timeout 10 -o "$icon_path" "$ICON_URL" 2>/dev/null || {
+        log_warn "Could not download the application icon; the desktop entry will use a fallback."
+        rm -f "$icon_path"
+        return 0
+    }
     if [ -f "$icon_path" ]; then
         log_success "Application icon installed: $icon_path"
     fi
@@ -1153,4 +1174,8 @@ main() {
     create_launchers
 }
 
-main "$@"
+# Sourced by tests/ to exercise individual functions; run main() only when this
+# script is executed directly.
+if [ "${VRCOSC_INSTALL_SH_SOURCED:-0}" != "1" ]; then
+    main "$@"
+fi
