@@ -14,6 +14,7 @@ readonly NC='\033[0;0m' # No Color
 
 readonly DISCORD_INVITE="https://discord.gg/vrcosc-1000862183963496519"
 readonly DISCORD_THREAD="https://discord.com/channels/1000862183963496519/1466540047149957374"
+readonly DEFAULT_DOTNET_CHANNEL="10.0"
 readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Logo.png"
 
 # Default state variables (configured solely via command-line arguments)
@@ -656,33 +657,137 @@ EOF_REG
     log_success "WPF registry patch applied successfully."
 }
 
+# Reads the .NET runtime band VRCOSC actually asks for out of its
+# runtimeconfig.json, as a "<major>.<minor>" channel. .NET's default rollForward
+# policy does not cross major versions, so installing the wrong major (10.0 for
+# a net9.0 build, say) leaves VRCOSC reporting that no runtime is installed even
+# though dotnet.exe sits right there in the same prefix.
+get_required_dotnet_channel() {
+    local dir="${1:-$(get_vrcosc_install_dir)}"
+    local cfg="$dir/VRCOSC.runtimeconfig.json"
+    [ -f "$cfg" ] || return 1
+
+    local channel=""
+    if command -v python3 &>/dev/null; then
+        channel="$(python3 - "$cfg" <<'PY' 2>/dev/null || true
+import json, re, sys
+
+with open(sys.argv[1]) as fh:
+    opts = json.load(fh).get("runtimeOptions", {})
+
+frameworks = opts.get("frameworks", [])
+if "framework" in opts:
+    frameworks = [opts["framework"]] + list(frameworks)
+
+for fw in frameworks:
+    if fw.get("name") == "Microsoft.WindowsDesktop.App" and fw.get("version"):
+        print(".".join(fw["version"].split(".")[:2]))
+        break
+else:
+    match = re.match(r"net(\d+\.\d+)", opts.get("tfm", ""))
+    if match:
+        print(match.group(1))
+PY
+)"
+    fi
+
+    # Fallback for hosts without python3: first version-looking field wins.
+    if [ -z "$channel" ]; then
+        channel="$(grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+' "$cfg" \
+            | head -n 1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+    fi
+    if [ -z "$channel" ]; then
+        channel="$(grep -oE '"tfm"[[:space:]]*:[[:space:]]*"net[0-9]+\.[0-9]+' "$cfg" \
+            | head -n 1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+    fi
+
+    [ -n "$channel" ] || return 1
+    echo "$channel"
+}
+
+# Lists the Microsoft.WindowsDesktop.App versions present in the prefix.
+get_installed_desktop_runtimes() {
+    local shared_dir="$VRC_COMPATDATA/pfx/drive_c/Program Files/dotnet/shared/Microsoft.WindowsDesktop.App"
+    [ -d "$shared_dir" ] || return 0
+    local d
+    for d in "$shared_dir"/*; do
+        [ -d "$d" ] && basename "$d"
+    done
+}
+
+# True when a runtime matching the requested "<major>.<minor>" channel is present.
+has_desktop_runtime_channel() {
+    local channel="$1" installed
+    while IFS= read -r installed; do
+        [ -n "$installed" ] || continue
+        [[ "$installed" == "$channel".* ]] && return 0
+    done < <(get_installed_desktop_runtimes)
+    return 1
+}
+
 install_dotnet_runtime() {
+    local channel
+    if channel="$(get_required_dotnet_channel)"; then
+        log_info "VRCOSC requires the .NET ${channel} Desktop Runtime (from VRCOSC.runtimeconfig.json)."
+    else
+        channel="$DEFAULT_DOTNET_CHANNEL"
+        log_warn "Could not read the required runtime from VRCOSC.runtimeconfig.json; assuming .NET ${channel}."
+    fi
+
     local installed_dotnet="$VRC_COMPATDATA/pfx/drive_c/Program Files/dotnet/dotnet.exe"
-    if [ -f "$installed_dotnet" ] && [ "$FORCE_INSTALL" -ne 1 ]; then
-        log_success ".NET Runtime already present in prefix ($installed_dotnet). Skipping download (use -f/--force to reinstall)."
+    if [ -f "$installed_dotnet" ] && has_desktop_runtime_channel "$channel" && [ "$FORCE_INSTALL" -ne 1 ]; then
+        log_success ".NET ${channel} Desktop Runtime already present in prefix. Skipping download (use -f/--force to reinstall)."
         return 0
     fi
 
-    log_info "Fetching latest .NET 10.0 Desktop Runtime download URL..."
+    if [ -f "$installed_dotnet" ] && ! has_desktop_runtime_channel "$channel"; then
+        local present
+        present="$(get_installed_desktop_runtimes | tr '\n' ' ')"
+        log_warn "Prefix has .NET Desktop Runtime(s) [${present:-none}] but VRCOSC needs ${channel}.x -- installing it alongside."
+    fi
+
+    log_info "Fetching latest .NET ${channel} Desktop Runtime download URL..."
     local dotnet_url
-    dotnet_url=$(curl -s https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json \
+    dotnet_url=$(curl -s "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${channel}/releases.json" \
         | grep -o 'https://[^"]*windowsdesktop-runtime-[0-9.]*-win-x64.exe' | head -n 1)
 
     if [ -z "$dotnet_url" ]; then
-        log_error "Error: Failed to fetch the .NET 10.0 Desktop Runtime download URL."
+        log_error "Error: Failed to fetch the .NET ${channel} Desktop Runtime download URL."
+        echo -e "${YELLOW}Check that channel ${channel} exists at https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${NC}"
         exit 1
     fi
 
-    log_info "Downloading .NET 10.0 from: $dotnet_url"
-    local dotnet_installer="$VRC_COMPATDATA/pfx/drive_c/windowsdesktop-runtime-10.exe"
+    log_info "Downloading .NET ${channel} from: $dotnet_url"
+    local dotnet_installer="$VRC_COMPATDATA/pfx/drive_c/windowsdesktop-runtime.exe"
     [ "$DRY_RUN" -eq 1 ] && return 0
 
     curl -L -o "$dotnet_installer" "$dotnet_url"
 
-    log_info "Installing .NET 10.0 Desktop Runtime in VRChat prefix..."
-    run_in_prefix "wine C:\\windowsdesktop-runtime-10.exe /quiet /norestart"
+    log_info "Installing .NET ${channel} Desktop Runtime in VRChat prefix..."
+    run_in_prefix "wine C:\\windowsdesktop-runtime.exe /quiet /norestart"
     rm -f "$dotnet_installer"
-    log_success ".NET 10.0 Desktop Runtime installed successfully."
+
+    verify_dotnet_runtime "$channel"
+}
+
+# Fails loudly when the runtime VRCOSC needs is not actually in the prefix after
+# installing. Silently proceeding here is what produced "installed fine but
+# VRCOSC says there is no runtime" reports.
+verify_dotnet_runtime() {
+    local channel="$1"
+    local installed
+    installed="$(get_installed_desktop_runtimes | tr '\n' ' ')"
+
+    if ! has_desktop_runtime_channel "$channel"; then
+        log_error "Error: .NET ${channel} Desktop Runtime is missing from the prefix after installation."
+        echo -e "  * Expected: ${CYAN}Microsoft.WindowsDesktop.App ${channel}.x${NC}"
+        echo -e "  * Present:  ${YELLOW}${installed:-none}${NC}"
+        echo -e "${YELLOW}The installer ran but wrote nothing usable. This is normally a broken wine${NC}"
+        echo -e "${YELLOW}environment -- try re-running with ${CYAN}--runtime host${YELLOW} or ${CYAN}--runtime container${YELLOW}.${NC}"
+        exit 1
+    fi
+
+    log_success ".NET Desktop Runtime verified in prefix: ${installed}"
 }
 
 install_vrcosc() {
@@ -940,8 +1045,8 @@ main() {
     configure_protontricks_permissions
     probe_runtime_mode
     apply_wpf_registry_fix
-    install_dotnet_runtime
     install_vrcosc
+    install_dotnet_runtime
     configure_firewall
     install_application_icon
     patch_vrchat_launch_bridge
