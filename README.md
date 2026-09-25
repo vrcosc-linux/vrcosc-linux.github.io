@@ -28,7 +28,8 @@ This installer configures VRCOSC to run seamlessly by:
 5. **Configuring firewall rules** for OSC/OSCQuery ports (9000, 9001, 5353 UDP).
 6. **Patching VRChat's `launch.exe` with a Linux IPC Named-Pipe Bridge**:
    - VRChat ships a Windows launcher (`launch.exe`) that fails under Proton when companion tools (like VRCX or external launchers) request in-game world/instance navigation via `\\.\pipe\VRChatURLLaunchPipe`.
-   - The installer creates a read-only backup (`launch.org.exe`, `chmod 444`) and places a drop-in C# replacement bridge (`launch.exe`, `chmod 555`).
+   - The installer creates a read-only backup (`launch.org.exe`, `chmod 444`) and places a drop-in C# replacement bridge (`launch.exe`, `chmod 555`). The bridge binary ships in `bin/`; a piped install, which has no script directory, downloads it instead and caches it under `~/.local/share/vrcosc-linux`.
+   - Steam restores the stock `launch.exe` on game updates and file validation, so the `vrcosc` launcher re-applies the patch before every session rather than leaving it to decay until the next install.
    - The bridge writes to VRChat's named pipe to open in-game world menus in real
      time, falling back to the original binary if VRChat isn't running. Wine named
      pipes belong to a single wine session, so this only works from inside VRChat's

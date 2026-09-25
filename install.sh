@@ -1263,6 +1263,22 @@ install_application_icon() {
     fi
 }
 
+# Copy the resolved bridge into its cache location, so the generated launcher
+# has one stable path to re-patch from even if the checkout is deleted later.
+# Echoes the cached path, or nothing if there is no payload to stage.
+stage_launch_bridge() {
+    local src cache
+    src="$(resolve_launch_bridge || true)"
+    [ -n "$src" ] || return 0
+    cache="$(get_launch_bridge_cache)"
+    if [ "$src" != "$cache" ]; then
+        mkdir -p "$(dirname "$cache")" || return 0
+        cp -f "$src" "$cache" || return 0
+        chmod 644 "$cache" 2>/dev/null || true
+    fi
+    echo "$cache"
+}
+
 patch_vrchat_launch_bridge() {
     log_info "Checking VRChat launch.exe for Linux IPC named-pipe bridge patch..."
     [ "$DRY_RUN" -eq 1 ] && return 0
@@ -1277,7 +1293,7 @@ patch_vrchat_launch_bridge() {
     fi
 
     local source_bridge
-    source_bridge="$(resolve_launch_bridge || true)"
+    source_bridge="$(stage_launch_bridge)"
     if [ -z "$source_bridge" ]; then
         log_warn "Could not obtain vrc-launch-bridge.exe (no local copy and the download failed). Skipping patch."
         return 0
@@ -1322,6 +1338,10 @@ create_launchers() {
     fi
 
     mkdir -p "$(dirname "$launch_script")"
+    local bridge_payload
+    bridge_payload="$(stage_launch_bridge)"
+    local vrc_game_dir
+    vrc_game_dir="$(get_vrchat_game_dir)"
     local runtime_flags
     runtime_flags="$(runtime_mode_flags "${RESOLVED_RUNTIME_MODE:-no-bwrap}")"
 
@@ -1334,6 +1354,37 @@ ENTRY="$win_entry"
 DOTNET="C:/Program Files/dotnet/dotnet.exe"
 COMPATDATA="$VRC_COMPATDATA"
 PFX="\$COMPATDATA/pfx"
+VRC_GAME_DIR="$vrc_game_dir"
+BRIDGE_PAYLOAD="$bridge_payload"
+
+# --- Keep VRChat's launch.exe bridged ----------------------------------------
+# Steam restores the stock launch.exe on every game update and on file
+# validation, which silently breaks vrchat:// navigation until the installer is
+# run again. Re-apply the patch here instead, since this runs before every
+# session. Nothing is touched if the bridge is already in place.
+repatch_launch_bridge() {
+    [ -n "\$BRIDGE_PAYLOAD" ] && [ -f "\$BRIDGE_PAYLOAD" ] || return 0
+    local target="\$VRC_GAME_DIR/launch.exe"
+    local backup="\$VRC_GAME_DIR/launch.org.exe"
+    [ -d "\$VRC_GAME_DIR" ] || return 0
+    if cmp -s "\$BRIDGE_PAYLOAD" "\$target"; then
+        chmod 555 "\$target" 2>/dev/null || true
+        return 0
+    fi
+    if [ ! -f "\$backup" ] && [ -f "\$target" ]; then
+        cp -p "\$target" "\$backup" 2>/dev/null || return 0
+        chmod 444 "\$backup" 2>/dev/null || true
+    fi
+    rm -f "\$target" 2>/dev/null || chmod 755 "\$target" 2>/dev/null || true
+    cp "\$BRIDGE_PAYLOAD" "\$target" 2>/dev/null || {
+        echo "VRCOSC: could not re-apply the launch.exe bridge; vrchat:// navigation may not work." >&2
+        return 0
+    }
+    chmod 555 "\$target" 2>/dev/null || true
+    echo "VRCOSC: re-applied VRChat's launch.exe bridge (Steam had restored the stock launcher)." >&2
+}
+
+repatch_launch_bridge
 
 # --- Preferred path: join VRChat's own wine session ---------------------------
 # Steam runs VRChat inside a user+mount namespace with its own wineserver. A

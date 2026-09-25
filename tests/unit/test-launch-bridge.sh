@@ -88,4 +88,48 @@ it "is idempotent on a second patch"
 PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
 assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.org.exe")"
 
+# --- the generated launcher re-applies the patch ------------------------------
+# Steam restores the stock launch.exe on update or validation, so a one-shot
+# patch at install time decays; the launcher runs before every session.
+mkdir -p "$WORK/bin"
+ln -sf "$FIXTURES/fake-protontricks" "$WORK/bin/protontricks"
+RESOLVED_RUNTIME_MODE="no-bwrap"
+VRCOSC_BRANCH="live"
+make_curl 'MZfake-bridge-payload'
+PATH="$WORK/bin:$PATH" create_launchers >/dev/null 2>&1
+launcher="$(get_launcher_script)"
+
+it "generates a launcher that knows where the bridge payload is"
+assert_contains "$(cat "$launcher")" "BRIDGE_PAYLOAD=\"$(get_launch_bridge_cache)\""
+
+it "the launcher is still syntactically valid"
+bash -n "$launcher" 2>"$WORK/err"
+assert_eq "" "$(cat "$WORK/err")"
+
+it "the launcher restores the bridge after Steam replaces launch.exe"
+chmod 755 "$game_dir/launch.exe"
+printf 'MZ stock launcher restored by Steam\n' > "$game_dir/launch.exe"
+env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" VRCOSC_JOIN=0 \
+    bash "$launcher" >/dev/null 2>"$WORK/launch.err"
+assert_eq "MZfake-bridge-payload" "$(cat "$game_dir/launch.exe")"
+
+it "and says so"
+assert_contains "$(cat "$WORK/launch.err")" "re-applied VRChat's launch.exe bridge"
+
+it "does not touch an already-bridged launch.exe"
+: > "$WORK/launch.err"
+env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" VRCOSC_JOIN=0 \
+    bash "$launcher" >/dev/null 2>"$WORK/launch.err"
+assert_not_contains "$(cat "$WORK/launch.err")" "re-applied"
+
+it "keeps the original backup across a re-patch"
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.org.exe")"
+
+it "still starts VRCOSC when the game directory has vanished"
+rm -rf "$game_dir"
+: > "$WORK/pt.log"
+env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" VRCOSC_JOIN=0 \
+    bash "$launcher" >/dev/null 2>&1
+assert_contains "$(cat "$WORK/pt.log")" "VRCOSC.dll"
+
 summarise
