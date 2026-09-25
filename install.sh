@@ -16,6 +16,7 @@ readonly DISCORD_INVITE="https://discord.gg/vrcosc-1000862183963496519"
 readonly DISCORD_THREAD="https://discord.com/channels/1000862183963496519/1466540047149957374"
 readonly DEFAULT_DOTNET_CHANNEL="10.0"
 readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Logo.png"
+readonly LAUNCH_BRIDGE_URL="https://raw.githubusercontent.com/Bluscream/vrcosc-linux/main/bin/vrc-launch-bridge.exe"
 
 # Default state variables (configured solely via command-line arguments)
 VRCOSC_BRANCH="live" # live or beta
@@ -71,6 +72,63 @@ get_vrcosc_install_dir() {
 get_vrchat_game_dir() {
     local steamapps_dir="$(dirname "$(dirname "$VRC_COMPATDATA")")"
     echo "$steamapps_dir/common/VRChat"
+}
+
+# Directory install.sh itself lives in, or empty when there is no script file --
+# which is the normal case for the documented `curl ... | bash` install, where
+# BASH_SOURCE is "bash" and a naive dirname silently yields the caller's cwd.
+# Where a downloaded bridge payload is kept between runs.
+get_launch_bridge_cache() {
+    echo "$HOME/.local/share/vrcosc-linux/vrc-launch-bridge.exe"
+}
+
+get_script_dir() {
+    local src="${BASH_SOURCE[0]:-}"
+    [ -f "$src" ] || return 0
+    (cd "$(dirname "$src")" && pwd)
+}
+
+# Absolute path to a usable vrc-launch-bridge.exe, or non-zero if there is none.
+# Prefers the copy beside the script, then a previously cached download, then
+# fetches it -- so a piped install still gets the bridge instead of skipping it.
+# Pass --no-download to stay offline (used by --info, which must not mutate).
+resolve_launch_bridge() {
+    local allow_download=1
+    [ "${1:-}" = "--no-download" ] && allow_download=0
+
+    local script_dir
+    script_dir="$(get_script_dir)"
+    if [ -n "$script_dir" ] && [ -f "$script_dir/bin/vrc-launch-bridge.exe" ]; then
+        echo "$script_dir/bin/vrc-launch-bridge.exe"
+        return 0
+    fi
+
+    local cache
+    cache="$(get_launch_bridge_cache)"
+    if [ -f "$cache" ]; then
+        echo "$cache"
+        return 0
+    fi
+
+    [ "$allow_download" -eq 1 ] || return 1
+    [ "$DRY_RUN" -eq 1 ] && return 1
+
+    local tmp
+    tmp="$(mktemp)" || return 1
+    if ! curl -fsSL --connect-timeout 10 -o "$tmp" "$LAUNCH_BRIDGE_URL" 2>/dev/null; then
+        rm -f "$tmp"
+        return 1
+    fi
+    # A rate-limit page or an HTML error body is not a PE binary; refuse it
+    # rather than installing garbage over VRChat's launcher.
+    if [ "$(head -c 2 "$tmp")" != "MZ" ]; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mkdir -p "$(dirname "$cache")" || { rm -f "$tmp"; return 1; }
+    mv "$tmp" "$cache" || { rm -f "$tmp"; return 1; }
+    chmod 644 "$cache"
+    echo "$cache"
 }
 
 get_all_installed_files() {
@@ -799,10 +857,10 @@ show_diagnostics() {
 
     local vrc_game_dir="$(get_vrchat_game_dir)"
     local target_launch="$vrc_game_dir/launch.exe"
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local source_bridge="$script_dir/bin/vrc-launch-bridge.exe"
+    local source_bridge
+    source_bridge="$(resolve_launch_bridge --no-download || true)"
     local bridge_status="${YELLOW}Unpatched / Missing${NC}"
-    if [ -f "$target_launch" ] && [ -f "$source_bridge" ] && cmp -s "$source_bridge" "$target_launch"; then
+    if [ -f "$target_launch" ] && [ -n "$source_bridge" ] && cmp -s "$source_bridge" "$target_launch"; then
         bridge_status="${GREEN}Patched (Linux IPC Named-Pipe Bridge)${NC}"
     elif [ -f "$target_launch" ]; then
         bridge_status="${YELLOW}Stock launch.exe (Unpatched)${NC}"
@@ -1212,16 +1270,16 @@ patch_vrchat_launch_bridge() {
     local vrc_game_dir="$(get_vrchat_game_dir)"
     local target_launch="$vrc_game_dir/launch.exe"
     local backup_launch="$vrc_game_dir/launch.org.exe"
-    local script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local source_bridge="$script_dir/bin/vrc-launch-bridge.exe"
 
     if [ ! -d "$vrc_game_dir" ]; then
         log_warn "VRChat game directory not found ($vrc_game_dir). Skipping launch.exe patch."
         return 0
     fi
 
-    if [ ! -f "$source_bridge" ]; then
-        log_warn "vrc-launch-bridge.exe not found at $source_bridge. Skipping patch."
+    local source_bridge
+    source_bridge="$(resolve_launch_bridge || true)"
+    if [ -z "$source_bridge" ]; then
+        log_warn "Could not obtain vrc-launch-bridge.exe (no local copy and the download failed). Skipping patch."
         return 0
     fi
 
