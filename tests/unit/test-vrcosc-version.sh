@@ -98,4 +98,36 @@ out="$(install_vrcosc 2>&1)"
 assert_contains "$out" "Downloading VRCOSC package"
 FORCE_INSTALL=0
 
+# --- release channel selection -------------------------------------------------
+# Beta builds are published as prereleases, and /releases/latest never returns
+# one, so asking it for the beta channel handed back the live package instead.
+RELEASES_JSON='[
+  {"tag_name":"2026.906.0","prerelease":true,"assets":[
+     {"browser_download_url":"https://github.com/VolcanicArts/VRCOSC/releases/download/2026.906.0/VRCOSC-2026.906.0-beta-full.nupkg"}]},
+  {"tag_name":"2026.807.0","prerelease":false,"assets":[
+     {"browser_download_url":"https://github.com/VolcanicArts/VRCOSC/releases/download/2026.807.0/VRCOSC-2026.807.0-live-full.nupkg"}]}
+]'
+github_api() { printf '%s' "$RELEASES_JSON"; }
+DRY_RUN=1
+FORCE_INSTALL=0
+# A prefix with nothing installed, so the downgrade guard stays out of the way.
+VRC_COMPATDATA="$("$FIXTURES/make-prefix.sh" --root "$WORK/channels" --no-vrcosc)"
+
+it "the live channel picks the live package"
+VRCOSC_BRANCH="live"
+assert_contains "$(install_vrcosc 2>&1)" "VRCOSC-2026.807.0-live-full.nupkg"
+
+it "the beta channel picks the prerelease package"
+VRCOSC_BRANCH="beta"
+assert_contains "$(install_vrcosc 2>&1)" "VRCOSC-2026.906.0-beta-full.nupkg"
+
+it "and does not silently fall back to the live package"
+VRCOSC_BRANCH="beta"
+assert_not_contains "$(install_vrcosc 2>&1)" "live-full.nupkg"
+
+it "says so when the channel has no package at all"
+RELEASES_JSON='[{"tag_name":"2026.807.0","prerelease":false,"assets":[]}]'
+VRCOSC_BRANCH="beta"
+assert_contains "$(install_vrcosc 2>&1)" "skipping VRCOSC download"
+
 summarise

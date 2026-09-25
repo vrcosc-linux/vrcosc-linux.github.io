@@ -1159,19 +1159,17 @@ verify_dotnet_runtime() {
 install_vrcosc() {
     log_info "Fetching latest VRCOSC release version (channel: $VRCOSC_BRANCH)..."
     local latest_release_json nupkg_url
-    latest_release_json="$(github_api https://api.github.com/repos/VolcanicArts/VRCOSC/releases/latest)"
 
     local pkg_pattern="live-full.nupkg"
     [ "$VRCOSC_BRANCH" = "beta" ] && pkg_pattern="beta-full.nupkg"
 
+    # /releases/latest never returns a prerelease, and beta builds are published
+    # as prereleases -- asking it for the beta channel quietly handed back the
+    # live package instead. Read the release list and pick per channel.
+    latest_release_json="$(github_api https://api.github.com/repos/VolcanicArts/VRCOSC/releases)"
+
     nupkg_url="$(grep -o "https://github.com/VolcanicArts/VRCOSC/releases/download/[^\"]*${pkg_pattern}" \
         <<< "$latest_release_json" | head -n 1 || true)"
-
-    # Fallback to any full nupkg if channel-specific filename differs
-    if [ -z "$nupkg_url" ]; then
-        nupkg_url="$(grep -o 'https://github.com/VolcanicArts/VRCOSC/releases/download/[^"]*-full.nupkg' \
-            <<< "$latest_release_json" | head -n 1 || true)"
-    fi
 
     if [ -z "$nupkg_url" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
