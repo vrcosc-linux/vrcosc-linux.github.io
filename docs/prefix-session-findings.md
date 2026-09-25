@@ -124,12 +124,70 @@ already true, and remove the contention. Recovering process detection is a
 separate problem from prefix layout, and needs a launch method that joins
 VRChat's session.
 
+## Channel verification (measured 2026-09-26)
+
+Every row previously marked "Yes" or inferred is now measured, with VRChat in
+desktop mode, logged in and in a world.
+
+### `vrchat://` navigation over the named pipe — session-bound, confirmed
+
+The repo's `bin/vrc-launch-bridge.exe` was run against a live game from both
+sides, with a copy of `cmd.exe` standing in for `launch.org.exe` so a fallback
+could not start a second VRChat:
+
+| Bridge ran | `CreateFileW \\.\pipe\VRChatURLLaunchPipe` | VRChat's log |
+| :--- | :--- | :--- |
+| inside VRChat's session (`nsenter`) | opened; acked, so no fallback | `VRCNP: Received URL 'vrchat://launch?ref=vrcosc-linux-test'` |
+| outside it (`protontricks`) | `status c0000034` (OBJECT_NAME_NOT_FOUND) | nothing |
+
+So the named-pipe bridge only works from inside the game's wine session, and it
+does work from there. The follow-on `Failed to parse URL` is only because the
+test URL carries no world id.
+
+### OSC — crosses the boundary entirely, confirmed
+
+`experiments/oscquery-probe.py`, a plain host Python process in no wine prefix,
+listening on UDP 9001 with VRCOSC stopped:
+
+```
+380  /avatar/parameters/VF89_SyncIndex2
+379  /avatar/parameters/VF89_SyncDataNum3
+...
+```
+
+Hundreds of live avatar parameters per minute. `ss -uanp` independently shows
+VRChat's OSC sockets as ordinary host sockets, and with VRCOSC running, VRChat
+connected to VRCOSC's `127.0.0.1:9001`.
+
+### OSCQuery HTTP — crosses the boundary, confirmed
+
+`curl http://127.0.0.1:46553/` from the host returned VRChat's full parameter
+tree, and `?HOST_INFO` returned
+`{"NAME":"VRChat-Client-344130",...,"OSC_PORT":9000,...}`.
+
+### OSCQuery mDNS discovery — advertising did not redirect VRChat
+
+With a correctly registered `_oscjson._tcp` + `_osc._udp` advertisement (verified
+present via `avahi-browse`, alongside VRChat's own `VRChat-Client-344130`),
+VRChat never fetched the probe's HTTP endpoint and kept sending to 9001 — with
+VRCOSC running and with it stopped. This does not affect VRCOSC, which uses the
+same default ports, and OSC delivery is confirmed above. Worth knowing before
+building anything that expects to be discovered on a non-default port.
+
+Two traps cost time here and are worth recording: a linuxbrew `avahi-publish-service`
+on `PATH` cannot reach the system `avahi-daemon` and exits instantly (use
+`/usr/bin/avahi-publish-service`), and the probe was discarding its stderr, so the
+failure looked like VRChat ignoring us.
+
 ## Reproducing
 
 `experiments/oscquery-probe.py` advertises `_oscjson._tcp` and `_osc._udp` over
 mDNS and serves an OSCQuery tree from the host, entirely outside any wine prefix.
-If VRChat talks to it, the OSC half of the table is confirmed end to end. It has
-**not** yet been run against a live VRChat.
+Stop VRCOSC first so UDP 9001 is free, then:
+
+```bash
+experiments/oscquery-probe.py --seconds 60        # defaults to 9001
+```
 
 The session questions are answered with `tasklist`, which needs no build step:
 

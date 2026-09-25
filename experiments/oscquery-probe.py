@@ -9,13 +9,24 @@ process shares the host's network namespace.
 
 It advertises itself the way VRCOSC does (_oscjson._tcp for the query protocol,
 _osc._udp for the data port), serves the OSCQuery tree over HTTP, and prints
-every OSC packet VRChat sends. With --chatbox it also sends to VRChat's port, so
-both directions are observable in game.
+every OSC packet VRChat sends. With --chatbox it also sends to VRChat's port.
 
-Usage: oscquery-probe.py [--osc-port 9101] [--http-port 9102] [--chatbox TEXT]
+Measured result (2026-09-26, VRChat in desktop mode, in a world): listening on
+9001 receives live avatar parameters -- hundreds per minute -- from a process
+that is not in any wine prefix. OSC crosses the boundary completely.
+
+Listen on 9001, VRChat's default OSC output port, and stop VRCOSC first so the
+port is free. Advertising over mDNS did NOT redirect VRChat to a different port
+in testing: it kept sending to 9001 regardless, so --osc-port 9101 receives
+nothing. That is fine for VRCOSC, which uses the same defaults (send 9000,
+receive 9001).
+
+Usage: oscquery-probe.py [--osc-port 9001] [--http-port 9102] [--chatbox TEXT]
 """
 import argparse
 import json
+import os
+import shutil
 import socket
 import struct
 import subprocess
@@ -158,7 +169,8 @@ def listen_osc(port: int, stop: threading.Event):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--osc-port", type=int, default=9101)
+    ap.add_argument("--osc-port", type=int, default=9001,
+                    help="VRChat's default OSC output port; free it by stopping VRCOSC")
     ap.add_argument("--http-port", type=int, default=9102)
     ap.add_argument("--seconds", type=int, default=60)
     ap.add_argument("--chatbox", default=None, help="send this text to VRChat's chatbox")
@@ -173,15 +185,34 @@ def main():
     print(f"[oscquery] HTTP on {args.http_port}", flush=True)
 
     # Advertise exactly the two service types VRChat's OSCQuery discovery looks for.
-    publishers = [
-        subprocess.Popen(
-            ["avahi-publish-service", "vrcosc-linux-probe", "_oscjson._tcp", str(args.http_port)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-        subprocess.Popen(
-            ["avahi-publish-service", "vrcosc-linux-probe", "_osc._udp", str(args.osc_port)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL),
-    ]
-    print("[mdns] advertising _oscjson._tcp and _osc._udp", flush=True)
+    # Use the distro's avahi binary explicitly: a Homebrew/linuxbrew avahi on PATH
+    # is built against a different socket path and cannot reach the system daemon,
+    # so it exits immediately -- and silently, if its output is discarded.
+    publish = "/usr/bin/avahi-publish-service"
+    if not os.path.exists(publish):
+        publish = shutil.which("avahi-publish-service")
+    if not publish:
+        print("[mdns] FATAL: avahi-publish-service not found; cannot advertise", flush=True)
+        return 2
+
+    publishers = []
+    for service, port in (("_oscjson._tcp", args.http_port), ("_osc._udp", args.osc_port)):
+        publishers.append(subprocess.Popen(
+            [publish, "vrcosc-linux-probe", service, str(port)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True))
+
+    # An advertisement that failed has already exited by now; report it instead of
+    # waiting out the whole run and blaming VRChat.
+    time.sleep(2)
+    for proc in publishers:
+        if proc.poll() is not None:
+            print(f"[mdns] FATAL: {publish} exited {proc.returncode}: "
+                  f"{(proc.stdout.read() if proc.stdout else '').strip()}", flush=True)
+            for other in publishers:
+                other.terminate()
+            return 2
+    print(f"[mdns] advertising _oscjson._tcp:{args.http_port} and "
+          f"_osc._udp:{args.osc_port} via {publish}", flush=True)
 
     if args.chatbox:
         def send_chatbox():
@@ -207,10 +238,14 @@ def main():
         print(f"Received {sum(received.values())} OSC messages across {len(received)} addresses:")
         for address, count in sorted(received.items(), key=lambda kv: -kv[1])[:25]:
             print(f"  {count:6d}  {address}")
-        print("\nOSC and OSCQuery work from outside any wine prefix.")
+        print("\nOSC reaches a process outside any wine prefix.")
         return 0
-    print("No OSC received. Either VRChat is not running, OSC is disabled in its")
-    print("settings and OSCQuery discovery did not take, or mDNS is being blocked.")
+    print("No OSC received. Check, in order:")
+    print("  * VRChat is running and in a world")
+    print(f"  * nothing else holds UDP {args.osc_port} (VRCOSC binds 9001) -- see `ss -lunp`")
+    print("  * VRChat is actually emitting: `ss -uanp | grep :9001` should show it connected")
+    print("  * this port is VRChat's OSC output port; mDNS advertising alone did not")
+    print("    move it off 9001 in testing")
     return 1
 
 
