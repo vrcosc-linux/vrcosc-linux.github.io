@@ -1535,6 +1535,45 @@ EOF_DESKTOP
     echo -e "    $vrcosc_dir"
 }
 
+# Put VRChat's own launch.exe back. Only the bridge is ours to remove: if Steam
+# has already restored a stock launcher, or shipped a newer one, that file stays
+# and only our now-redundant backup goes.
+restore_vrchat_launch_bridge() {
+    local game_dir target backup payload
+    game_dir="$(get_vrchat_game_dir)"
+    target="$game_dir/launch.exe"
+    backup="$game_dir/launch.org.exe"
+
+    [ -f "$backup" ] || return 1
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log_info "Would restore $target from launch.org.exe."
+        return 0
+    fi
+
+    payload="$(resolve_launch_bridge --no-download || true)"
+    if [ -f "$target" ] && [ -n "$payload" ] && ! files_identical "$target" "$payload"; then
+        log_info "launch.exe is not our bridge; leaving it and removing the stale backup."
+        rm -f "$backup"
+        return 0
+    fi
+
+    if files_identical "$target" "$backup"; then
+        log_info "launch.exe is already VRChat's own; removing the redundant backup."
+        rm -f "$backup"
+        return 0
+    fi
+
+    chmod 755 "$target" 2>/dev/null || true
+    rm -f "$target" 2>/dev/null || true
+    if ! cp "$backup" "$target" 2>/dev/null; then
+        log_warn "Could not restore $target from launch.org.exe; the backup has been left in place."
+        return 1
+    fi
+    chmod 755 "$target" 2>/dev/null || true
+    rm -f "$backup"
+    log_success "Restored VRChat's original launch.exe."
+}
+
 uninstall_vrcosc() {
     log_warn "Starting VRCOSC uninstallation..."
     locate_vrchat_prefix
@@ -1557,6 +1596,17 @@ uninstall_vrcosc() {
             removed=1
         fi
     done
+
+    # Undo the launch.exe patch, and drop the bridge payload we cached for it.
+    restore_vrchat_launch_bridge && removed=1
+    local cache
+    cache="$(get_launch_bridge_cache)"
+    if [ -f "$cache" ] && [ "$DRY_RUN" -ne 1 ]; then
+        log_info "Removing cached bridge payload: $cache"
+        rm -f "$cache"
+        rmdir "$(dirname "$cache")" 2>/dev/null || true
+        removed=1
+    fi
 
     if [ "$removed" -eq 1 ]; then
         log_success "VRCOSC successfully uninstalled."

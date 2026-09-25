@@ -75,7 +75,7 @@ bash install.sh [OPTIONS]
 | `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC configs & prefix registries to Desktop |
 | `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
 | `--branch <live\|beta>` | Choose release channel (`live` or `beta`, defaults to `live`) |
-| `-u, --uninstall` | Cleanly remove VRCOSC binaries, launcher script, and desktop shortcut (preserves user settings) |
+| `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |
 | `--dry-run` | Simulate actions without modifying files or installing runtimes |
 | `--skip-firewall` | Skip firewall inspection and rule generation |
 | `--patch` | Replace VRChat's `launch.exe` with the IPC bridge, enabling `vrchat://` navigation. Off by default, since it modifies VRChat's install directory. `--path` is accepted as an alias |

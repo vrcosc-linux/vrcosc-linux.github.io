@@ -239,4 +239,71 @@ it "neither flag leaves patching off"
 ( PATCH_LAUNCH=0; parse_arguments --skip-firewall; [ "$PATCH_LAUNCH" -eq 0 ] )
 assert_ok "$?"
 
+# --- uninstall puts VRChat's own launcher back --------------------------------
+PATCH_LAUNCH=1
+VRCOSC_BRANCH="live"
+fresh_prefix() {
+    VRC_COMPATDATA="$("$FIXTURES/make-prefix.sh" --root "$WORK/$1")"
+    game_dir="$(get_vrchat_game_dir)"
+}
+
+it "restores the original launch.exe"
+fresh_prefix un1
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+PATH="$WORK/bin:$PATH" restore_vrchat_launch_bridge >/dev/null 2>&1
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.exe")"
+
+it "and removes its own backup afterwards"
+assert_eq "1" "$([ -e "$game_dir/launch.org.exe" ] && echo 0 || echo 1)"
+
+it "leaves the restored launcher executable"
+fresh_prefix un2
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+PATH="$WORK/bin:$PATH" restore_vrchat_launch_bridge >/dev/null 2>&1
+assert_contains "$(stat -c '%A' "$game_dir/launch.exe")" "x"
+
+it "does nothing when there is no backup to restore from"
+fresh_prefix un3
+PATH="$WORK/bin:$PATH" restore_vrchat_launch_bridge >/dev/null 2>&1
+assert_fails "$?"
+
+it "and leaves that untouched launch.exe alone"
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.exe")"
+
+it "keeps a launch.exe that is not our bridge"
+fresh_prefix un4
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+chmod 755 "$game_dir/launch.exe"
+printf 'MZ newer stock launcher from a game update\n' > "$game_dir/launch.exe"
+PATH="$WORK/bin:$PATH" restore_vrchat_launch_bridge >/dev/null 2>&1
+assert_eq "MZ newer stock launcher from a game update" "$(cat "$game_dir/launch.exe")"
+
+it "but drops the backup that is now stale"
+assert_eq "1" "$([ -e "$game_dir/launch.org.exe" ] && echo 0 || echo 1)"
+
+it "reports what it would do under --dry-run without doing it"
+fresh_prefix un5
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+DRY_RUN=1
+out="$(PATH="$WORK/bin:$PATH" restore_vrchat_launch_bridge 2>&1)"
+DRY_RUN=0
+assert_contains "$out" "Would restore"
+
+it "and really left it patched"
+assert_file_exists "$game_dir/launch.org.exe"
+
+it "a full uninstall restores the launcher and clears the cached payload"
+fresh_prefix un6
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+PATH="$WORK/bin:$PATH" create_launchers >/dev/null 2>&1
+locate_vrchat_prefix() { :; }
+PATH="$WORK/bin:$PATH" uninstall_vrcosc >/dev/null 2>&1
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.exe")"
+
+it "and the cached payload is gone"
+assert_eq "1" "$([ -e "$(get_launch_bridge_cache)" ] && echo 0 || echo 1)"
+
+it "and so is the launcher script"
+assert_eq "1" "$([ -e "$(get_launcher_script)" ] && echo 0 || echo 1)"
+
 summarise
