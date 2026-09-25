@@ -83,12 +83,18 @@ bash install.sh [OPTIONS]
 | `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
 | `--branch <live\|beta>` | Choose release channel, `live` or `beta`, default `live`. Beta is published as a GitHub prerelease and installs alongside live, with its own directory, settings and `vrcosc-beta` command |
 | `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |
-| `--dry-run` | Simulate actions without modifying files or installing runtimes. Honoured by every mode, including `--uninstall` |
+| `--purge` | Also delete VRCOSC's settings, profiles and logs for the selected `--branch`, for every user in the prefix. Use with `--uninstall` to remove the binaries too, or on its own to delete only settings; it never installs anything. If the config directory is a symlink, the target is deleted, so check `--purge --dry-run` first |
+| `--dry-run` | Simulate actions without modifying files or installing runtimes. Honoured by every mode, including `--uninstall` and `--purge` |
 | `--skip-firewall` | Skip firewall inspection and rule generation |
 | `--patch` | Replace VRChat's `launch.exe` with the IPC bridge, enabling `vrchat://` navigation. Off by default, since it modifies VRChat's install directory. `--path` is accepted as an alias |
 | `--prefix <PATH>` | Explicitly supply your custom VRChat compatdata/438100 path |
 | `--runtime <MODE>` | How wine is invoked: `auto` (default, probes and picks a working mode), `no-bwrap`, `host` (no Steam Runtime), `container` (Steam Runtime with bwrap) |
 | `-h, --help` | Show command usage and options |
+
+`--purge` is the only flag that destroys data you cannot get back from a
+reinstall. Pair it with `--dry-run` once before running it for real: the dry run
+lists every directory it would delete, resolves symlinks so you can see where
+they point, and changes nothing.
 
 **Start with `--info`** if anything misbehaves. It reports the state of everything
 the installer depends on, and is safe to run at any time.

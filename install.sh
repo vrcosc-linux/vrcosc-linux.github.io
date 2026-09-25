@@ -33,6 +33,7 @@ INFO_MODE=0
 DRY_RUN=0
 SKIP_FIREWALL=0
 PATCH_LAUNCH=0            # patching VRChat's launch.exe is opt-in; see --patch
+PURGE_MODE=0              # delete settings and profiles as well; see --purge
 VRC_COMPATDATA=""
 RUNTIME_MODE="auto"        # auto | no-bwrap | host | container
 RESOLVED_RUNTIME_MODE=""   # filled in by probe_runtime_mode()
@@ -74,6 +75,18 @@ get_app_icon_path() {
 get_vrcosc_install_dir() {
     local base="$VRC_COMPATDATA/pfx/drive_c/users/steamuser/AppData/Local"
     [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && echo "$base/VRCOSC-beta" || echo "$base/VRCOSC"
+}
+
+# Every user directory in the prefix that holds config for the selected branch.
+# Steam prefixes routinely carry both steamuser and a real user name, and a user
+# may have pointed the directory somewhere else with a symlink.
+get_vrcosc_config_dirs() {
+    local leaf="VRCOSC"
+    [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && leaf="VRCOSC-Beta"
+    local d
+    for d in "$VRC_COMPATDATA/pfx/drive_c/users"/*/AppData/Roaming/"$leaf"; do
+        [ -e "$d" ] && echo "$d"
+    done
 }
 
 get_vrchat_game_dir() {
@@ -243,6 +256,10 @@ print_usage() {
     echo "  -f, --force               Force re-download and re-installation of .NET and VRCOSC"
     echo "      --branch <live|beta>  Specify release channel to install (default: live)"
     echo "  -u, --uninstall           Uninstall VRCOSC binaries, launcher script, and desktop shortcut"
+    echo "      --purge               Also delete VRCOSC's settings, profiles and logs for the"
+    echo "                            selected --branch. Use with --uninstall to remove binaries"
+    echo "                            too, or on its own to delete only settings. Installs"
+    echo "                            nothing. Follows the config directory if it is a symlink."
     echo "      --dry-run             Simulate actions without writing files or running installers"
     echo "      --skip-firewall       Do not attempt firewall port configuration"
     echo "      --patch               Replace VRChat's launch.exe with the Linux IPC bridge,"
@@ -275,6 +292,10 @@ parse_arguments() {
                 ;;
             -u|--uninstall)
                 UNINSTALL_MODE=1
+                shift
+                ;;
+            --purge)
+                PURGE_MODE=1
                 shift
                 ;;
             --branch)
@@ -1533,6 +1554,43 @@ EOF_DESKTOP
     echo -e "    $vrcosc_dir"
 }
 
+# Delete settings, profiles and logs for the selected branch. Only the branch's
+# own directory is touched: a prefix may also hold VRCOSC-Dev or other
+# directories this installer never created, and those are not ours to remove.
+purge_vrcosc_config() {
+    local dirs resolved d purged=0
+    dirs="$(get_vrcosc_config_dirs)"
+
+    if [ -z "$dirs" ]; then
+        log_info "No $VRCOSC_BRANCH configuration directory found; nothing to purge."
+        return 0
+    fi
+
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        resolved="$(readlink -f "$d" 2>/dev/null || echo "$d")"
+        if [ "$resolved" != "$d" ]; then
+            log_warn "  $d"
+            log_warn "    is a symlink to $resolved, which will be deleted too."
+        else
+            log_warn "  $d"
+        fi
+        if [ "$DRY_RUN" -eq 1 ]; then
+            continue
+        fi
+        rm -rf "${resolved:?}"
+        [ -L "$d" ] && rm -f "$d"
+        purged=1
+    done <<< "$dirs"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log_info "Dry run: the directories above would be deleted; nothing was touched."
+        return 0
+    fi
+    [ "$purged" -eq 1 ] && log_success "VRCOSC $VRCOSC_BRANCH configuration purged."
+    return 0
+}
+
 # Put VRChat's own launch.exe back. Only the bridge is ours to remove: if Steam
 # has already restored a stock launcher, or shipped a newer one, that file stays
 # and only our now-redundant backup goes.
@@ -1650,6 +1708,15 @@ main() {
 
     if [ "$UNINSTALL_MODE" -eq 1 ]; then
         uninstall_vrcosc
+        [ "$PURGE_MODE" -eq 1 ] && purge_vrcosc_config
+        exit 0
+    fi
+
+    # --purge on its own deletes settings and stops; it never installs anything,
+    # so there is no path where a purge is followed by a surprise install.
+    if [ "$PURGE_MODE" -eq 1 ]; then
+        locate_vrchat_prefix
+        purge_vrcosc_config
         exit 0
     fi
 
