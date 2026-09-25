@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# A wine prefix can only be owned by one wineserver at a time. Multiple users
-# reported that VRChat and VRCOSC would not run at the same time, with VRCOSC
-# crashing inside Velopack's updater ("Access denied" out of EnumProcessModules)
-# whenever VRChat held the prefix. The installer and the launcher must detect that
-# and say so, rather than proceeding into a wine backtrace.
+# Users reported VRCOSC dying inside Velopack's updater ("Access denied" out of
+# EnumProcessModules) when VRChat was already running in the same prefix. Testing
+# on a live system showed the two DO often run together, so this is reported as a
+# note rather than enforced -- but it must be reported, and it must match how both
+# Proton and protontricks spell WINEPREFIX (Proton adds a trailing slash).
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/assert.sh"
 
@@ -58,28 +58,35 @@ assert_contains "$out" "Prefix In Use By"
 it "--info explains what a held prefix means for VRCOSC"
 assert_contains "$out" "Access denied"
 
-it "the installer refuses to run against a held prefix"
-out="$(run_install --skip-firewall)"; rc=$?
-assert_fails $rc
-it "and says to close VRChat"
-assert_contains "$out" "Close VRChat"
-it "and offers the override"
-assert_contains "$out" "VRCOSC_ALLOW_BUSY_PREFIX=1"
+it "the installer warns about a held prefix but does not refuse"
+out="$(run_install --dry-run --skip-firewall)"
+assert_contains "$out" "already using this prefix"
+it "and names the Velopack symptom to look for"
+assert_contains "$out" "Access denied"
 
-it "VRCOSC_ALLOW_BUSY_PREFIX=1 lets the installer proceed past the check"
-out="$(run_install VRCOSC_ALLOW_BUSY_PREFIX=1 --dry-run --skip-firewall)"
-assert_contains "$out" "continuing anyway"
+it "detects a holder that spells WINEPREFIX with a trailing slash, as Proton does"
+# Proton exports WINEPREFIX=<path>/ ; protontricks exports it without the slash.
+# Matching only one spelling made the check miss VRChat entirely.
+stop_holder
+env -i WINEPREFIX="$PREFIX/pfx/" PATH=/usr/bin:/bin sleep 300 &
+HOLDER_PID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    grep -qzF "WINEPREFIX=$PREFIX/pfx/" "/proc/$HOLDER_PID/environ" 2>/dev/null && break
+    sleep 0.2
+done
+out="$(run_install --dry-run --skip-firewall)"
+assert_contains "$out" "already using this prefix"
 
 stop_holder
 
-it "the installer proceeds once the prefix is free"
+it "says nothing about a busy prefix once it is free"
 out="$(run_install --dry-run --skip-firewall)"
-assert_not_contains "$out" "already in use"
+assert_not_contains "$out" "already using this prefix"
 
 # The generated launcher carries the same guard, since that is where users meet
 # the problem: a desktop-menu launch with no terminal to read an error from.
 it "generates a launcher while the prefix is free"
-run_install VRCOSC_ALLOW_BUSY_PREFIX=1 --skip-firewall >/dev/null 2>&1 || true
+run_install --skip-firewall >/dev/null 2>&1 || true
 LAUNCHER="$WORK/home/.local/bin/vrcosc"
 # The install step needs the network; fall back to generating the launcher alone.
 if [ ! -f "$LAUNCHER" ]; then
@@ -99,20 +106,18 @@ assert_contains "$(cat "$WORK/pt.log")" "VRCOSC.dll"
 
 start_holder || { echo "could not restart the stand-in prefix holder"; exit 1; }
 
-it "the launcher refuses to start while the prefix is held"
+it "the launcher notes a held prefix on stderr"
 : > "$WORK/pt.log"
 out="$(env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
-    bash "$LAUNCHER" 2>&1)"; rc=$?
-assert_fails $rc
-it "the launcher explains why rather than crashing in wine"
-assert_contains "$out" "already in use by"
-it "the launcher does not invoke wine at all when the prefix is held"
-assert_eq "" "$(cat "$WORK/pt.log")"
+    bash "$LAUNCHER" 2>&1)"
+assert_contains "$out" "already using this wine prefix"
 
-it "VRCOSC_ALLOW_BUSY_PREFIX=1 overrides the launcher guard too"
-: > "$WORK/pt.log"
-env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
-    VRCOSC_ALLOW_BUSY_PREFIX=1 bash "$LAUNCHER" >/dev/null 2>&1
+it "but still starts VRCOSC, since the two usually coexist"
 assert_contains "$(cat "$WORK/pt.log")" "VRCOSC.dll"
+
+it "VRCOSC_QUIET=1 suppresses the note"
+out="$(env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
+    VRCOSC_QUIET=1 bash "$LAUNCHER" 2>&1)"
+assert_not_contains "$out" "already using this wine prefix"
 
 summarise

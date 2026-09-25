@@ -297,7 +297,10 @@ get_prefix_holders() {
     local proc pid name
     for proc in /proc/[0-9]*; do
         [ -r "$proc/environ" ] || continue
-        tr '\0' '\n' < "$proc/environ" 2>/dev/null | grep -qxF "WINEPREFIX=$pfx" || continue
+        # Proton exports "WINEPREFIX=<path>/" with a trailing slash while
+        # protontricks exports it without, so both spellings must match.
+        tr '\0' '\n' < "$proc/environ" 2>/dev/null \
+            | grep -qxF -e "WINEPREFIX=$pfx" -e "WINEPREFIX=$pfx/" || continue
         pid="${proc#/proc/}"
         name="$(cat "$proc/comm" 2>/dev/null || true)"
         echo "$pid ${name:-unknown}"
@@ -305,26 +308,21 @@ get_prefix_holders() {
     return 0
 }
 
-# Refuses to touch a prefix another wine session already owns. Set
-# VRCOSC_ALLOW_BUSY_PREFIX=1 to proceed anyway.
-ensure_prefix_not_busy() {
+# Reports when another wine session already holds this prefix.
+#
+# This is a warning, not a refusal: verified on a live system, VRCOSC and VRChat
+# do run at the same time in one prefix, so blocking would break working setups.
+# But when a launch does fail this is nearly always why, so name the symptom.
+warn_if_prefix_busy() {
     local holders
     holders="$(get_prefix_holders)"
     [ -n "$holders" ] || return 0
 
-    if [ "${VRCOSC_ALLOW_BUSY_PREFIX:-0}" = "1" ]; then
-        log_warn "Prefix is in use by another wine session, continuing anyway (VRCOSC_ALLOW_BUSY_PREFIX=1):"
-        printf '%s\n' "$holders" | sed 's/^/      /'
-        return 0
-    fi
-
-    log_error "The VRChat Proton prefix is already in use by another wine session:"
+    log_warn "Another wine session is already using this prefix:"
     printf '%s\n' "$holders" | sed 's/^/  * /'
-    echo ""
-    echo -e "${YELLOW}Only one wine session can own a prefix at a time. Close VRChat (and any${NC}"
-    echo -e "${YELLOW}running VRCOSC), wait a few seconds for wineserver to exit, then try again.${NC}"
-    echo -e "Override with ${CYAN}VRCOSC_ALLOW_BUSY_PREFIX=1${NC} if you know what you are doing."
-    exit 1
+    echo -e "${YELLOW}This usually still works. If VRCOSC instead dies with${NC}"
+    echo -e "  ${CYAN}System.ComponentModel.Win32Exception (5): Access denied${NC} in Velopack,"
+    echo -e "${YELLOW}close VRChat, wait for wineserver to exit, and try again.${NC}"
 }
 
 # Runtime modes tried by "auto", in order. no-bwrap first so hosts that already
@@ -631,9 +629,9 @@ show_diagnostics() {
         holders="$(get_prefix_holders)"
         if [ -n "$holders" ]; then
             echo -e "  * Prefix In Use By:      ${RED}$(printf '%s' "$holders" | tr '\n' ',' | sed 's/,$//')${NC}"
-            echo -e "    ${YELLOW}Only one wine session may own a prefix. While something else holds it,${NC}"
-            echo -e "    ${YELLOW}VRCOSC cannot start (it crashes in Velopack with 'Access denied') and the${NC}"
-            echo -e "    ${YELLOW}runtime probes below are unreliable. Close VRChat and re-run --info.${NC}"
+            echo -e "    ${YELLOW}Usually harmless, but if VRCOSC dies with 'Access denied' in Velopack,${NC}"
+            echo -e "    ${YELLOW}this is why. The runtime probes below are also less reliable while a${NC}"
+            echo -e "    ${YELLOW}session is active -- close VRChat and re-run --info for a clean read.${NC}"
         else
             echo -e "  * Prefix In Use By:      ${GREEN}Nothing (free)${NC}"
         fi
@@ -1159,25 +1157,18 @@ ENTRY="$win_entry"
 DOTNET="C:/Program Files/dotnet/dotnet.exe"
 PFX="$VRC_COMPATDATA/pfx"
 
-# A prefix can only be owned by one wine session at a time. Starting VRCOSC while
-# VRChat (or another VRCOSC) holds this prefix gets it far enough to load .NET and
-# then crash in Velopack's updater with "Access denied", which looks like a VRCOSC
-# bug rather than a prefix conflict. Say so instead.
-if [ "\${VRCOSC_ALLOW_BUSY_PREFIX:-0}" != "1" ]; then
-    holders=""
+# Report, but do not block on, another wine session holding this prefix: it
+# usually works, and when it does not the failure is a Velopack "Access denied"
+# crash that this note explains.
+if [ "\${VRCOSC_QUIET:-0}" != "1" ]; then
     for proc in /proc/[0-9]*; do
         [ -r "\$proc/environ" ] || continue
-        if tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null | grep -qxF "WINEPREFIX=\$PFX"; then
-            holders="\$holders \$(cat "\$proc/comm" 2>/dev/null || echo unknown)(\${proc#/proc/})"
+        if tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null \
+            | grep -qxF -e "WINEPREFIX=\$PFX" -e "WINEPREFIX=\$PFX/"; then
+            echo "VRCOSC: note: \$(cat "\$proc/comm" 2>/dev/null) (\${proc#/proc/}) is already using this wine prefix." >&2
+            echo "VRCOSC: if VRCOSC now dies with 'Access denied' in Velopack, close VRChat first." >&2
         fi
     done
-    if [ -n "\$holders" ]; then
-        echo "VRCOSC: the VRChat Proton prefix is already in use by:\$holders" >&2
-        echo "VRCOSC: only one wine session can own a prefix at a time -- close VRChat," >&2
-        echo "VRCOSC: wait a few seconds, then start VRCOSC again." >&2
-        echo "VRCOSC: set VRCOSC_ALLOW_BUSY_PREFIX=1 to try anyway." >&2
-        exit 1
-    fi
 fi
 
 # Drop Steam Runtime variables leaked in by the calling shell. With them set,
@@ -1266,7 +1257,7 @@ main() {
     echo -e "${BLUE}=== VRCOSC Bazzite/Linux Installer ===${NC}"
     check_dependencies
     locate_vrchat_prefix
-    ensure_prefix_not_busy
+    warn_if_prefix_busy
     configure_protontricks_permissions
     probe_runtime_mode
     apply_wpf_registry_fix
