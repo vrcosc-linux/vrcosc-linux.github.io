@@ -107,7 +107,9 @@ assert_contains "$out" "Checking firewall configuration"
 it "and says it is adding nothing"
 assert_contains "$out" "Not adding any firewall rules"
 
-it "and reports what it found"
+it "and names the ports either way"
+# On a host with no firewall tool at all it must still say which ports it could
+# not check -- a reader of this output is trying to find out if 9001 is blocked.
 assert_contains "$out" "9001/udp"
 
 summarise

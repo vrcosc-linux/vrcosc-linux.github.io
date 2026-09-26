@@ -1813,7 +1813,13 @@ report_firewall_rules() {
         found=1
     fi
 
-    [ "$found" -eq 1 ] || echo -e "  * ${YELLOW}no firewall tool found to inspect${NC}"
+    if [ "$found" -eq 0 ]; then
+        # Naming the ports even here: someone reading this output is trying to work
+        # out whether a port is blocked, and "no tool found" alone does not tell
+        # them which ports they would have to check by hand.
+        echo -e "  * ${YELLOW}no firewall tool found to inspect (firewall-cmd, ufw, iptables)${NC}"
+        echo -e "      ${YELLOW}9000/udp, 9001/udp and 5353/udp could not be checked${NC}"
+    fi
 }
 
 # VRChat and VRCOSC on the same machine talk over loopback, which no firewall
