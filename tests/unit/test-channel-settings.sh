@@ -190,11 +190,13 @@ assert_contains "$out" "Would delete"
 
 # --- the app rewrites settings on exit, so writing under it is a silent no-op ---
 
+# vrcosc_is_running is stubbed here; what it actually detects is covered by
+# tests/unit/test-vrcosc-running.sh.
 it "refuses to write while VRCOSC is running"
 write_settings '{"settings":{"UpdateChannel":0},"metadata":{},"version":1}'
 seed_packages
 VRCOSC_BRANCH="beta"
-get_prefix_holders() { echo "4242 VRCOSC.exe"; }
+vrcosc_is_running() { return 0; }
 out="$(apply_channel_settings 2>&1)"
 assert_eq "0" "$(get UpdateChannel)"
 
@@ -205,7 +207,7 @@ it "and says what to do about it"
 assert_contains "$out" "Close it and run the installer again"
 
 it "but an unrelated wine process is not VRCOSC"
-get_prefix_holders() { echo "4242 wineserver"; }
+vrcosc_is_running() { return 1; }
 apply_channel_settings >/dev/null 2>&1
 assert_eq "1" "$(get UpdateChannel)"
 

@@ -22,7 +22,7 @@ readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Lo
 # This installer's own version, independent of the VRCOSC release it installs.
 # Bump it when cutting a tag; --version and --info report it, and it is the first
 # thing to ask for in a bug report.
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 
 # Where this script is published, for messages that tell people how to re-run it.
 readonly INSTALL_URL="https://vrcosc-linux.github.io/install.sh"
@@ -637,8 +637,22 @@ PYPKG
 # from memory when it exits, so anything written underneath a running instance is
 # silently discarded -- the settings would look applied here and be gone by the
 # time the user looked.
+#
+# Matching on the command line, not the process name: the generated launcher runs
+# "dotnet.exe .../VRCOSC.dll", so the process is called dotnet.exe and a check on
+# the name never fired for the one way this installer actually starts VRCOSC.
 vrcosc_is_running() {
-    get_prefix_holders | awk '{print $2}' | grep -qi '^VRCOSC'
+    local pfx="$VRC_COMPATDATA/pfx"
+    local proc cmdline
+    for proc in /proc/[0-9]*; do
+        cat "$proc/environ" 2>/dev/null | tr '\0' '\n' \
+            | grep -qxF -e "WINEPREFIX=$pfx" -e "WINEPREFIX=$pfx/" || continue
+        cmdline="$(cat "$proc/cmdline" 2>/dev/null | tr '\0' ' ')"
+        case "$cmdline" in
+            *VRCOSC.dll*|*VRCOSC.exe*) return 0 ;;
+        esac
+    done
+    return 1
 }
 
 # Brings the shared settings in line with the branch being installed.

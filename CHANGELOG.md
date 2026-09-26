@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.2 — 2026-09-26
+
+- The guard that stops the installer writing settings underneath a running
+  VRCOSC never fired. It matched on the process name, but the generated launcher
+  runs `dotnet.exe .../VRCOSC.dll`, so the process is called `dotnet.exe` — the
+  check missed the only way this installer actually starts VRCOSC. It now matches
+  on the command line, and `tests/unit/test-vrcosc-running.sh` covers both
+  launch shapes, another prefix, VRChat, and unrelated wine processes.
+
+  Found by starting the app after a real reinstall and asking whether the guard
+  fired, rather than by the suite, which stubbed the function it was testing.
+
 ## v1.0.1 — 2026-09-26
 
 - The package list printed before a channel switch clears `packages.json` named
