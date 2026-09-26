@@ -1,0 +1,94 @@
+// Stand-in for protontricks. Behaviour is chosen with FAKE_PT_PROFILE so tests
+// can reproduce specific host breakages without a real Proton prefix:
+//
+//   clean                every runtime mode works
+//   fontconfig-mismatch  only --no-runtime works; the others emit the bogus
+//                        'Fontconfig error: ... out of memory' seen on hosts
+//                        where runtime libraries meet host config files
+//   bwrap-broken         bwrap containerisation fails (nested sandbox)
+//   all-broken           nothing works
+//   version-fails        `--version` exits non-zero but wine calls are fine
+//                        (the pipx build's pkg_resources warning case)
+//
+// Every invocation is appended to $FAKE_PT_LOG as one record so tests can assert
+// on the flags used AND on which environment variables survived into the call.
+import { env_or, echo_err, join_words, first_match } from "../../src/util.ab"
+
+fun broken(): Null {
+    echo_err("protontricks (WARNING): Current Steam Runtime not recognized by Protontricks.")
+    echo_err("Fontconfig error: \"/etc/fonts/fonts.conf\", line 86: out of memory")
+    echo_err("Fontconfig error: Cannot load config file from /etc/fonts/fonts.conf")
+    exit(1)
+}
+
+main(args) {
+    const argv = args[1..len(args)]
+    const profile = env_or("FAKE_PT_PROFILE", "clean")
+
+    const log = env_or("FAKE_PT_LOG", "")
+    if log != "" {
+        let record = "ARGV: {join_words(argv)}\n"
+        for v in ["LD_LIBRARY_PATH", "LD_PRELOAD", "FONTCONFIG_PATH", "FONTCONFIG_FILE", "STEAM_RUNTIME", "PRESSURE_VESSEL_RUNTIME", "WINEPREFIX"] {
+            const value = env_or(v, "")
+            if value != "" {
+                record += "ENV: {v}={value}\n"
+            }
+        }
+        record += "---"
+        trust $ printf '%s\n' "{record}" >> "{log}" $
+    }
+
+    let is_command_call = false
+    for arg in argv {
+        if arg == "-c" {
+            is_command_call = true
+        }
+    }
+
+    if not is_command_call {
+        if profile == "version-fails" {
+            echo_err("warning: pkg_resources is deprecated as an API.")
+            exit(1)
+        }
+        echo("protontricks (fake-protontricks) 1.12.0")
+        exit(0)
+    }
+
+    let mode = "container"
+    for arg in argv {
+        if {
+            arg == "--no-runtime": mode = "host"
+            arg == "--no-bwrap": mode = "no-bwrap"
+        }
+    }
+
+    if {
+        profile == "fontconfig-mismatch" and mode != "host": broken()
+        profile == "bwrap-broken" and mode == "container": broken()
+        profile == "all-broken": broken()
+    }
+
+    // Succeeded: emit something that looks like the requested command's output.
+    const command = join_words(argv)
+    if {
+        first_match(command, "wine --version") != "" {
+            echo("wine-11.0")
+        }
+        first_match(command, "windowsdesktop-runtime") != "" {
+            // Simulate the runtime installer populating the prefix. FAKE_PT_INSTALLS_RUNTIME
+            // is an explicit version, or "auto" to install whichever channel the
+            // installer asked for (the channel is in the .exe filename).
+            let want = env_or("FAKE_PT_INSTALLS_RUNTIME", "")
+            if want == "auto" {
+                const channel = trust $ printf '%s' "{command}" | grep -oE 'windowsdesktop-runtime-[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\$' $
+                want = channel != "" then "{channel}.1" else ""
+            }
+            const prefix = env_or("FAKE_PT_PREFIX", "")
+            if prefix != "" and want != "" {
+                trust $ mkdir -p "{prefix}/pfx/drive_c/Program Files/dotnet/shared/Microsoft.WindowsDesktop.App/{want}" $
+                trust $ touch "{prefix}/pfx/drive_c/Program Files/dotnet/dotnet.exe" $
+            }
+        }
+    }
+    exit(0)
+}

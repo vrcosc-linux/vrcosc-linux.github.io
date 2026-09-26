@@ -1,0 +1,100 @@
+// Required tools, and how to install a missing one on the system in front of us.
+import { YELLOW, CYAN, NC } from "constants.ab"
+import { log_info, log_error, log_warn } from "log.ab"
+import { have_cmd, env_or, is_readable, join_words } from "util.ab"
+
+// Which package manager this system uses. Checked in order of specificity: an
+// image-based system has rpm-ostree *and* dnf, and installing with dnf there
+// either fails or writes to a layer that the next update discards.
+pub fun detect_package_manager(): Text {
+    const os_release = env_or("OS_RELEASE_FILE", "/etc/os-release")
+    if is_readable(os_release) {
+        trust silent $ grep -qE '^ID=steamos' "{os_release}" $
+        if status() == 0 {
+            return "steamos"
+        }
+    }
+    if {
+        have_cmd("rpm-ostree"): return "rpm-ostree"
+        have_cmd("apt-get"): return "apt"
+        have_cmd("dnf"): return "dnf"
+        have_cmd("pacman"): return "pacman"
+        have_cmd("zypper"): return "zypper"
+        have_cmd("apk"): return "apk"
+        have_cmd("xbps-install"): return "xbps"
+    }
+    return "unknown"
+}
+
+// The package that provides a command. nsenter is the only one whose package name
+// differs from the command: it ships in util-linux, which is why it is present on
+// essentially every system without anyone installing it.
+pub fun package_for(command: Text): Text {
+    if command == "nsenter" {
+        return "util-linux"
+    }
+    return command
+}
+
+// Print the exact command for this system. protontricks is deliberately not in the
+// distro list: most repositories either do not carry it or carry a version too old
+// to know about modern Proton, and its own project recommends Flatpak or pipx.
+pub fun print_install_hint(commands: [Text]): Null {
+    let pkgs = [Text]
+    let needs_protontricks = false
+    for command in commands {
+        if command == "protontricks" {
+            needs_protontricks = true
+        } else {
+            pkgs += [package_for(command)]
+        }
+    }
+
+    if len(pkgs) > 0 {
+        const list = join_words(pkgs)
+        echo("{YELLOW}Install the missing packages with:{NC}")
+        const manager = detect_package_manager()
+        if {
+            manager == "apt": echo("  {CYAN}sudo apt-get install -y {list}{NC}")
+            manager == "dnf": echo("  {CYAN}sudo dnf install -y {list}{NC}")
+            manager == "pacman": echo("  {CYAN}sudo pacman -S --needed {list}{NC}")
+            manager == "zypper": echo("  {CYAN}sudo zypper install -y {list}{NC}")
+            manager == "apk": echo("  {CYAN}sudo apk add {list}{NC}")
+            manager == "xbps": echo("  {CYAN}sudo xbps-install -S {list}{NC}")
+            manager == "rpm-ostree": echo("  {CYAN}rpm-ostree install {list}{NC}  (image-based system: takes effect after a reboot)")
+            manager == "steamos" {
+                echo("  {CYAN}sudo steamos-readonly disable && sudo pacman -S --needed {list}{NC}")
+                echo("  {YELLOW}SteamOS resets its root filesystem on update, so this may need repeating.{NC}")
+            }
+            else: echo("  {CYAN}{list}{NC} — install these with your distribution's package manager.")
+        }
+    }
+
+    if needs_protontricks {
+        echo("{YELLOW}Install protontricks with either:{NC}")
+        echo("  {CYAN}flatpak install -y flathub com.github.Matoking.protontricks{NC}")
+        echo("  {CYAN}pipx install protontricks{NC}")
+        echo("  Bazzite and SteamOS ship it already; on SteamOS prefer the Flatpak.")
+    }
+}
+
+pub fun check_dependencies(): Null {
+    log_info("Verifying dependencies...")
+    let missing = [Text]
+    for command in ["protontricks", "curl", "unzip"] {
+        if not have_cmd(command) {
+            missing += [command]
+        }
+    }
+
+    if len(missing) > 0 {
+        log_error("Error: The following required dependencies are missing: {join_words(missing)}")
+        print_install_hint(missing)
+        exit(1)
+    }
+
+    if not have_cmd("nsenter") {
+        log_warn("nsenter (util-linux) not found: VRCOSC will run in its own wine session and will not see VRChat.")
+        print_install_hint(["nsenter"])
+    }
+}

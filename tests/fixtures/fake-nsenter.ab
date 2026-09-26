@@ -1,0 +1,28 @@
+// Stand-in for nsenter: records the namespace arguments, then runs the command
+// in place. Tests cannot enter a real container, but they can assert that the
+// launcher asked to, and that what it ran inside is right.
+import { env_or } from "../../src/util.ab"
+
+main(args) {
+    const log = env_or("FAKE_NSENTER_LOG", "")
+    let rest = args[1..len(args)]
+    if log != "" {
+        trust $ echo "NSENTER: {rest}" >> "{log}" $
+    }
+    loop {
+        if len(rest) == 0 {
+            break
+        }
+        const arg = rest[0]
+        if {
+            arg == "-t": rest = rest[2..len(rest)]
+            arg == "-U" or arg == "-m" or arg == "--preserve-credentials": rest = rest[1..len(rest)]
+            arg == "--" {
+                rest = rest[1..len(rest)]
+                break
+            }
+            else: break
+        }
+    }
+    trust $ exec {rest} $
+}

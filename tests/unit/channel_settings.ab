@@ -1,0 +1,205 @@
+// Installing the other channel hands the new app the old one's shared settings
+// and package records. Getting that wrong is not cosmetic: a beta install left
+// on the live channel replaces itself with the stable build, and stale package
+// records report modules as installed whose DLLs cannot load.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, VRCOSC_BRANCH, DRY_RUN } from "../../src/state.ab"
+import { channel_value_for_branch, apply_channel_settings } from "../../src/channel.ab"
+import { read_file } from "../../src/util.ab"
+
+const WORK = work_dir()
+set_text(VRC_COMPATDATA, make_prefix("{WORK}/steam"))
+const CFG = "{VRC_COMPATDATA}/pfx/drive_c/users/steamuser/AppData/Roaming/VRCOSC/configuration"
+trust $ mkdir -p "{CFG}" $
+
+fun get(key: Text): Text {
+    return trust $ python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['settings'].get(sys.argv[2]))" "{CFG}/settings.json" "{key}" 2>/dev/null $
+}
+
+fun write_settings(json: Text): Null {
+    write_file("{CFG}/settings.json", json)
+}
+
+fun apply(): Text {
+    capture_start()
+    apply_channel_settings()
+    return capture_stop()
+}
+
+fun packages_present(): Bool {
+    trust $ [ -f "{CFG}/packages.json" ] $
+    return status() == 0
+}
+
+// The shape VRCOSC actually writes, copied from a real packages.json: a list of
+// {package_id, version} under "installed", beside a "cache" holding the whole
+// remote catalogue. Getting this wrong is not academic -- the first version of
+// this code treated the file as a flat id->version map and printed "cache" at the
+// user instead of the two modules they had to reinstall.
+fun seed_packages(): Null {
+    write_file("{CFG}/packages.json", "\{
+  \"installed\": [
+    \{\"package_id\": \"volcanicarts.vrcosc.officialmodules\", \"version\": \"2026.906.1\"},
+    \{\"package_id\": \"bluscream.vrcosc.modules\", \"version\": \"2026.0926.0\"}
+  ],
+  \"cache_expire_time\": \"2026-09-27T03:15:35.4474707+02:00\",
+  \"cache\": [
+    \{\"owner\": \"VolcanicArts\", \"name\": \"VRCOSC-Modules\", \"repository\": \{\"default_branch\": \"main\"}}
+  ],
+  \"version\": 1
+}
+")
+}
+
+// A python3 that is not there, for the grep fallbacks.
+fun hide_python(): Null {
+    stub_missing("{WORK}/nopython", "python3")
+    prepend_path("{WORK}/nopython")
+}
+
+// --- the enum mapping, which everything else is derived from ---
+
+test "the channel enum" {
+    expect_eq("live is channel 0", "0", "{channel_value_for_branch("live")}")?
+    expect_eq("beta is channel 1", "1", "{channel_value_for_branch("beta")}")?
+}
+
+// --- a first install, where there is nothing to switch from ---
+
+test "a first beta install writes a settings file" {
+    set_text(VRCOSC_BRANCH, "beta")
+    apply()
+    expect_exists("writes a settings file when there is none yet", "{CFG}/settings.json")?
+    expect_eq("and it names the beta channel", "1", get("UpdateChannel"))?
+    expect_eq("and it turns pre-release packages on", "True", get("AllowPreReleasePackages"))?
+    const version = trust $ python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['version'])" "{CFG}/settings.json" $
+    expect_eq("and it carries the version the app expects, or the file is ignored", "1", version)?
+}
+
+test "a fresh live install writes channel 0" {
+    set_text(VRCOSC_BRANCH, "live")
+    apply()
+    expect_eq("channel 0", "0", get("UpdateChannel"))?
+    expect_eq("and does not touch pre-release visibility, which is not ours to force", "None", get("AllowPreReleasePackages"))?
+}
+
+// --- editing an existing file ---
+
+test "sets the channel without discarding other settings" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0,\"StartInTray\":true},\"metadata\":\{\"InstalledVersion\":\"2026.807.0\"},\"version\":1}")
+    set_text(VRCOSC_BRANCH, "beta")
+    apply()
+    expect_eq("channel set", "1", get("UpdateChannel"))?
+    expect_eq("and keeps the unrelated setting", "True", get("StartInTray"))?
+    expect_contains("and keeps the metadata", read_file("{CFG}/settings.json"), "2026.807.0")?
+}
+
+test "adds the channel key when the file has no such key yet" {
+    write_settings("\{\"settings\":\{\"StartInTray\":true},\"metadata\":\{},\"version\":1}")
+    set_text(VRCOSC_BRANCH, "beta")
+    apply()
+    expect_eq("channel added", "1", get("UpdateChannel"))?
+}
+
+// --- switching back to live, the direction that was never tested ---
+
+test "switching to live turns pre-release packages back off" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":1,\"AllowPreReleasePackages\":true},\"metadata\":\{},\"version\":1}")
+    set_text(VRCOSC_BRANCH, "live")
+    apply()
+    expect_eq("pre-release off", "False", get("AllowPreReleasePackages"))?
+    expect_eq("and moves the channel to live", "0", get("UpdateChannel"))?
+}
+
+test "re-running a live install leaves a deliberate pre-release choice alone" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0,\"AllowPreReleasePackages\":true},\"metadata\":\{},\"version\":1}")
+    set_text(VRCOSC_BRANCH, "live")
+    apply()
+    expect_eq("still on", "True", get("AllowPreReleasePackages"))?
+}
+
+// --- the package cache, which only a switch may clear ---
+
+test "a channel switch clears the package cache" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0},\"metadata\":\{},\"version\":1}")
+    seed_packages()
+    set_text(VRCOSC_BRANCH, "beta")
+    const out = apply()
+    expect_false("packages.json is gone", packages_present())?
+    expect_contains("and prints what was installed, since that list is the only record", out, "volcanicarts.vrcosc.officialmodules 2026.906.1")?
+    expect_contains("and prints every installed package, not just the first", out, "bluscream.vrcosc.modules 2026.0926.0")?
+    expect_not_contains("and does not offer the remote catalogue as something to reinstall", out, "* cache")?
+}
+
+test "re-running the same channel keeps the package cache" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":1},\"metadata\":\{},\"version\":1}")
+    seed_packages()
+    set_text(VRCOSC_BRANCH, "beta")
+    apply()
+    expect_exists("kept", "{CFG}/packages.json")?
+}
+
+test "a first install keeps it too, having nothing to switch from" {
+    trust $ rm -f "{CFG}/settings.json" $
+    seed_packages()
+    set_text(VRCOSC_BRANCH, "beta")
+    apply()
+    expect_exists("kept", "{CFG}/packages.json")?
+}
+
+// --- hosts without python3 ---
+
+test "without python3, the channel is still flipped where the key exists" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0,\"AllowPreReleasePackages\":false},\"metadata\":\{},\"version\":1}")
+    hide_python()
+    set_text(VRCOSC_BRANCH, "beta")
+    apply()
+    const file = read_file("{CFG}/settings.json")
+    expect_contains("channel flipped by sed", file, "\"UpdateChannel\": 1")?
+    expect_contains("and so is pre-release visibility", file, "\"AllowPreReleasePackages\": true")?
+}
+
+test "without python3, the package ids are still recovered before deletion" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0},\"metadata\":\{},\"version\":1}")
+    seed_packages()
+    hide_python()
+    set_text(VRCOSC_BRANCH, "beta")
+    const out = apply()
+    expect_contains("names the package", out, "bluscream.vrcosc.modules")?
+    expect_false("and a switch detected without python3 still clears the cache", packages_present())?
+}
+
+// --- dry run ---
+
+test "changes nothing under --dry-run" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0,\"AllowPreReleasePackages\":false},\"metadata\":\{},\"version\":1}")
+    seed_packages()
+    set_text(VRCOSC_BRANCH, "beta")
+    set_bool(DRY_RUN, true)
+    const out = apply()
+    expect_eq("changes no setting", "0", get("UpdateChannel"))?
+    expect_exists("and deletes no package cache", "{CFG}/packages.json")?
+    expect_contains("and says what it would have done", out, "Would set update channel to beta")?
+    expect_contains("and says it would clear the cache", out, "Would delete")?
+}
+
+// --- the app rewrites settings on exit, so writing under it is a silent no-op ---
+
+test "refuses to write while VRCOSC is running" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0},\"metadata\":\{},\"version\":1}")
+    seed_packages()
+    set_text(VRCOSC_BRANCH, "beta")
+    start_named_process(WORK, "VRCOSC.exe", ["WINEPREFIX={VRC_COMPATDATA}/pfx"])
+    const out = apply()
+    expect_eq("channel untouched", "0", get("UpdateChannel"))?
+    expect_exists("and leaves the package cache alone, since it did not switch anything", "{CFG}/packages.json")?
+    expect_contains("and says what to do about it", out, "Close it and run the installer again")?
+}
+
+test "but an unrelated wine process is not VRCOSC" {
+    write_settings("\{\"settings\":\{\"UpdateChannel\":0},\"metadata\":\{},\"version\":1}")
+    set_text(VRCOSC_BRANCH, "beta")
+    start_named_process(WORK, "wineserver", ["WINEPREFIX={VRC_COMPATDATA}/pfx"])
+    apply()
+    expect_eq("channel set", "1", get("UpdateChannel"))?
+}

@@ -1,0 +1,166 @@
+// Talking to GitHub about VRCOSC releases, comparing versions, and installing
+// the package into the prefix.
+import { YELLOW, CYAN, NC } from "constants.ab"
+import { VRCOSC_BRANCH, DRY_RUN, FORCE_INSTALL } from "state.ab"
+import { log_info, log_success, log_warn, log_error } from "log.ab"
+import { env_or, matches, mkdir_p } from "util.ab"
+import { get_vrcosc_install_dir, get_vrcosc_version_from_dir } from "paths.ab"
+import { starts_with, ends_with } from "std/text"
+
+// GET a GitHub API URL. Uses GITHUB_TOKEN/GH_TOKEN when the caller has one,
+// because the unauthenticated limit is 60 requests/hour per IP and shared or
+// NAT'd addresses hit it routinely -- which otherwise looks like "GitHub is down".
+// The token is only ever sent to api.github.com, and never echoed.
+pub fun github_api(url: Text): Text {
+    let token = env_or("GITHUB_TOKEN", "")
+    if token == "" {
+        token = env_or("GH_TOKEN", "")
+    }
+    if token != "" and starts_with(url, "https://api.github.com/") {
+        return trust $ curl -fsS --connect-timeout 10 \
+            -H "User-Agent: vrcosc-installer" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Authorization: Bearer {token}" "{url}" 2>&1 || true $
+    }
+    return trust $ curl -fsS --connect-timeout 10 \
+        -H "User-Agent: vrcosc-installer" \
+        -H "X-GitHub-Api-Version: 2022-11-28" \
+        "{url}" 2>&1 || true $
+}
+
+// True when a GitHub response says the address is rate-limited.
+pub fun looks_rate_limited(response: Text): Bool {
+    return matches(response, "error: 403|rate limit")
+}
+
+// Drops trailing ".0" components so the four-part version recorded in
+// VRCOSC.deps.json ("2026.812.0.0") compares equal to the three-part release tag
+// it came from ("2026.812.0").
+pub fun normalise_version(version: Text): Text {
+    let v = version
+    loop {
+        if not ends_with(v, ".0") {
+            break
+        }
+        v = trust $ printf '%s' "\$\{{nameof(v)}%.0}" $
+    }
+    return v
+}
+
+// "newer", "older" or "same" for version a relative to b.
+pub fun compare_versions(a_raw: Text, b_raw: Text): Text {
+    const a = normalise_version(a_raw)
+    const b = normalise_version(b_raw)
+
+    if a == b {
+        return "same"
+    }
+
+    const highest = trust $ printf '%s\n%s\n' "{a}" "{b}" | sort -V | tail -n 1 $
+    if highest == a {
+        return "newer"
+    }
+    return "older"
+}
+
+// The version a release asset URL delivers, taken from the tag in its path:
+// .../releases/download/2026.807.0/VRCOSC-2026.807.0-live-full.nupkg
+pub fun get_version_from_asset_url(url: Text): Text {
+    return trust $ sed -n 's|.*/releases/download/\([^/]*\)/.*|\1|p' <<< "{url}" $
+}
+
+pub fun install_vrcosc(): Null? {
+    log_info("Fetching latest VRCOSC release version (channel: {VRCOSC_BRANCH})...")
+
+    let pkg_pattern = "live-full.nupkg"
+    if VRCOSC_BRANCH == "beta" {
+        pkg_pattern = "beta-full.nupkg"
+    }
+
+    // /releases/latest never returns a prerelease, and beta builds are published
+    // as prereleases -- asking it for the beta channel quietly handed back the
+    // live package instead. Read the release list and pick per channel.
+    const latest_release_json = github_api("https://api.github.com/repos/VolcanicArts/VRCOSC/releases")
+
+    const nupkg_url = trust $ grep -o "https://github.com/VolcanicArts/VRCOSC/releases/download/[^\"]*{pkg_pattern}" <<< "{latest_release_json}" | head -n 1 $
+
+    if nupkg_url == "" {
+        if DRY_RUN {
+            log_warn("Dry run: could not reach the GitHub releases API; skipping VRCOSC download.")
+            return null
+        }
+        log_error("Error: Failed to fetch the VRCOSC {VRCOSC_BRANCH} package URL.")
+        if looks_rate_limited(latest_release_json) {
+            echo("{YELLOW}GitHub is rate-limiting this address (60 requests/hour when unauthenticated).{NC}")
+            echo("Wait an hour, or export a token first: {CYAN}export GITHUB_TOKEN=\$(gh auth token){NC}")
+        } else {
+            echo("{YELLOW}GitHub may be unreachable. Response was:{NC}")
+            trust $ printf '%s\n' "{latest_release_json}" | head -n 5 | sed 's/^/  /' $
+        }
+        exit(1)
+    }
+
+    // Do not clobber a newer local build. The maintainer routinely runs a build
+    // ahead of the published release, and this function deletes the install
+    // directory before unpacking, so an unconditional install is a downgrade.
+    const remote_version = get_version_from_asset_url(nupkg_url)
+    const local_version = get_vrcosc_version_from_dir(get_vrcosc_install_dir())
+
+    if not FORCE_INSTALL and remote_version != "" {
+        if {
+            local_version == "Not installed" {
+                // nothing there yet
+            }
+            local_version == "Installed" {
+                log_warn("Installed VRCOSC has no readable version (no VRCOSC.deps.json); reinstalling {remote_version}.")
+            }
+            else {
+                const relation = compare_versions(local_version, remote_version)
+                if {
+                    relation == "same" {
+                        log_success("VRCOSC {local_version} is already the latest {VRCOSC_BRANCH} release. Skipping download (use -f/--force to reinstall).")
+                        return null
+                    }
+                    relation == "newer" {
+                        log_warn("Installed VRCOSC {local_version} is newer than the latest {VRCOSC_BRANCH} release ({remote_version}); not downgrading.")
+                        echo("Use {CYAN}-f/--force{NC} to install {remote_version} over it anyway.")
+                        return null
+                    }
+                }
+            }
+        }
+    }
+
+    log_info("Downloading VRCOSC package from: {nupkg_url}")
+    if DRY_RUN {
+        return null
+    }
+
+    // mktemp, not a fixed name: a predictable path in a shared /tmp lets another
+    // local user pre-plant a symlink and have the download land on a file of ours.
+    const work_dir = trust $ mktemp -d "\$\{TMPDIR:-/tmp}/vrcosc-install.XXXXXX" $
+    if status() != 0 or work_dir == "" {
+        log_error("Could not create a temporary directory.")
+        exit(1)
+    }
+    const nupkg_file = "{work_dir}/vrcosc-latest.nupkg"
+
+    // -f, or a 404 body lands in the .nupkg and unzip reports a corrupt archive
+    // through the error banner, naming nothing useful.
+    $ curl -fL -o "{nupkg_file}" "{nupkg_url}" $?
+
+    const vrcosc_dir = get_vrcosc_install_dir()
+    log_info("Installing VRCOSC to {vrcosc_dir}...")
+    mkdir_p(vrcosc_dir)
+
+    // Clean previous installation binaries
+    $ rm -rf "\$\{{nameof(vrcosc_dir)}:?}"/* $?
+
+    const temp_extract = "{work_dir}/extract"
+    $ mkdir -p "{temp_extract}" $?
+    $ unzip -q "{nupkg_file}" -d "{temp_extract}" $?
+
+    $ cp -r "{temp_extract}/lib/app/"* "{vrcosc_dir}/" $?
+    trust $ rm -rf "{work_dir}" $
+    log_success("VRCOSC files extracted successfully.")
+}

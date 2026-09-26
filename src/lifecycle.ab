@@ -1,0 +1,125 @@
+// Taking VRCOSC off a machine again: --purge and --uninstall.
+import { YELLOW, NC } from "constants.ab"
+import { VRCOSC_BRANCH, DRY_RUN } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { file_exists, dir_exists, is_symlink, dirname } from "util.ab"
+import { get_vrcosc_config_dirs, get_vrcosc_install_dir, get_all_installed_files, get_launch_bridge_cache } from "paths.ab"
+import { locate_vrchat_prefix } from "prefix.ab"
+import { restore_vrchat_launch_bridge } from "bridge.ab"
+import { revoke_protontricks_permissions } from "flatpak.ab"
+import { report_firewall_rules_on_uninstall } from "firewall.ab"
+
+// Delete settings, profiles and logs for the selected branch. Only the branch's
+// own directory is touched: a prefix may also hold VRCOSC-Dev or other
+// directories this installer never created, and those are not ours to remove.
+pub fun purge_vrcosc_config(): Null {
+    const dirs = get_vrcosc_config_dirs()
+    let purged = false
+
+    if VRCOSC_BRANCH == "beta" {
+        log_warn("Note: beta shares its settings with the live install, so this purges both.")
+    }
+
+    if len(dirs) == 0 {
+        log_info("No {VRCOSC_BRANCH} configuration directory found; nothing to purge.")
+        return null
+    }
+
+    for d in dirs {
+        const resolved = trust $ readlink -f "{d}" 2>/dev/null || echo "{d}" $
+        if resolved != d {
+            log_warn("  {d}")
+            log_warn("    is a symlink to {resolved}, which will be deleted too.")
+        } else {
+            log_warn("  {d}")
+        }
+        if DRY_RUN {
+            continue
+        }
+        trust $ rm -rf "\$\{{nameof(resolved)}:?}" $
+        if is_symlink(d) {
+            trust $ rm -f "{d}" $
+        }
+        purged = true
+    }
+
+    if DRY_RUN {
+        log_info("Dry run: the directories above would be deleted; nothing was touched.")
+        return null
+    }
+    if purged {
+        log_success("VRCOSC {VRCOSC_BRANCH} configuration purged.")
+    }
+}
+
+pub fun uninstall_vrcosc(): Null {
+    if DRY_RUN {
+        log_warn("Simulating VRCOSC uninstallation (--dry-run; nothing will be removed)...")
+    } else {
+        log_warn("Starting VRCOSC uninstallation...")
+    }
+    locate_vrchat_prefix()
+
+    let removed = false
+    // Remove installation directories
+    for dir in [get_vrcosc_install_dir("live"), get_vrcosc_install_dir("beta")] {
+        if dir_exists(dir) {
+            if DRY_RUN {
+                log_info("Would remove binaries: {dir}")
+            } else {
+                log_info("Removing binaries: {dir}")
+                trust $ rm -rf "{dir}" $
+            }
+            removed = true
+        }
+    }
+
+    // Remove launchers, shortcuts, and icon
+    for f in get_all_installed_files() {
+        if file_exists(f) {
+            if DRY_RUN {
+                log_info("Would remove file: {f}")
+            } else {
+                log_info("Removing file: {f}")
+                trust $ rm -f "{f}" $
+            }
+            removed = true
+        }
+    }
+
+    // Undo the launch.exe patch, and drop the bridge payload we cached for it.
+    if restore_vrchat_launch_bridge() {
+        removed = true
+    }
+    const cache = get_launch_bridge_cache()
+    if file_exists(cache) {
+        if DRY_RUN {
+            log_info("Would remove cached bridge payload: {cache}")
+        } else {
+            log_info("Removing cached bridge payload: {cache}")
+            trust $ rm -f "{cache}" $
+            trust silent $ rmdir "{dirname(cache)}" $
+        }
+        removed = true
+    }
+
+    // The flatpak grants are part of what installing did to this machine, so
+    // "cleanly remove" has to include them.
+    if revoke_protontricks_permissions() {
+        removed = true
+    }
+
+    report_firewall_rules_on_uninstall()
+
+    if DRY_RUN {
+        log_info("Dry run complete; nothing was removed.")
+        return null
+    }
+
+    if removed {
+        log_success("VRCOSC successfully uninstalled.")
+        echo("{YELLOW}Note: Your configurations in AppData/Roaming/VRCOSC have been preserved.{NC}")
+    } else {
+        log_info("Nothing found to uninstall.")
+    }
+}

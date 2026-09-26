@@ -1,0 +1,78 @@
+// VRCOSC automated installer, updater, and runner setup for Bazzite / Linux.
+//
+// This is the entry point of the Amber sources that compile to install.sh. Each
+// step lives in its own module; this file only decides which of them run.
+import { BLUE, NC } from "constants.ab"
+import { INFO_MODE, BACKUP_MODE, UNINSTALL_MODE, PURGE_MODE } from "state.ab"
+import { on_error } from "log.ab"
+import { parse_arguments } from "cli.ab"
+import { check_dependencies } from "deps.ab"
+import { locate_vrchat_prefix } from "prefix.ab"
+import { warn_if_prefix_busy, probe_runtime_mode } from "runtime.ab"
+import { configure_protontricks_permissions } from "flatpak.ab"
+import { apply_wpf_registry_fix } from "registry.ab"
+import { install_vrcosc } from "vrcosc.ab"
+import { install_dotnet_runtime } from "dotnet.ab"
+import { apply_channel_settings } from "channel.ab"
+import { configure_firewall } from "firewall.ab"
+import { install_application_icon } from "icon.ab"
+import { patch_vrchat_launch_bridge } from "bridge.ab"
+import { create_launchers } from "launcher.ab"
+import { show_diagnostics } from "diagnostics.ab"
+import { create_backup } from "backup.ab"
+import { purge_vrcosc_config, uninstall_vrcosc } from "lifecycle.ab"
+
+// Runs the mode the flags asked for. Expected problems are reported and exit on
+// the spot; anything that fails unexpectedly propagates out to main, which shows
+// the error banner with the exit code.
+fun run(args: [Text]): Null? {
+    parse_arguments(args)
+
+    if INFO_MODE {
+        show_diagnostics()
+        exit(0)
+    }
+
+    if BACKUP_MODE {
+        create_backup()?
+        exit(0)
+    }
+
+    if UNINSTALL_MODE {
+        uninstall_vrcosc()
+        if PURGE_MODE {
+            purge_vrcosc_config()
+        }
+        exit(0)
+    }
+
+    // --purge on its own deletes settings and stops; it never installs anything,
+    // so there is no path where a purge is followed by a surprise install.
+    if PURGE_MODE {
+        locate_vrchat_prefix()
+        purge_vrcosc_config()
+        exit(0)
+    }
+
+    echo("{BLUE}=== VRCOSC Bazzite/Linux Installer ==={NC}")
+    check_dependencies()
+    locate_vrchat_prefix()
+    warn_if_prefix_busy()
+    configure_protontricks_permissions()
+    probe_runtime_mode()
+    apply_wpf_registry_fix()?
+    install_vrcosc()?
+    install_dotnet_runtime()?
+    apply_channel_settings()
+    configure_firewall()
+    install_application_icon()
+    patch_vrchat_launch_bridge()
+    create_launchers()?
+}
+
+main(args) {
+    // args[0] is the script itself.
+    run(args[1..len(args)]) failed {
+        on_error(status())
+    }
+}

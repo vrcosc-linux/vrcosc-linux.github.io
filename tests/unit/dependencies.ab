@@ -1,0 +1,108 @@
+// A missing dependency is the first thing a new user hits, and "dependency X is
+// missing" without a command to run is where they stop. These cover the mapping
+// from a missing command to the right instruction for the system in front of them.
+import * from "../lib/harness.ab"
+import { detect_package_manager, package_for, print_install_hint } from "../../src/deps.ab"
+
+const WORK = work_dir()
+const BIN = "{WORK}/bin"
+const OS_RELEASE = "{WORK}/os-release"
+set_env("OS_RELEASE_FILE", OS_RELEASE)
+write_file(OS_RELEASE, "ID=fedora\n")
+const REAL_PATH = trust $ printf '%s' "\$PATH" $
+
+// Only the package managers named here exist for a given case. PATH is the stub
+// directory and nothing else, because a host may really have rpm-ostree in
+// /usr/bin and would win every detection otherwise; the handful of real tools the
+// code needs are linked in explicitly.
+fun only(managers: [Text]): Null {
+    trust $ rm -rf "{BIN}"; mkdir -p "{BIN}" $
+    for t in ["grep", "sed", "printf", "head", "awk"] {
+        trust $ ln -sf "\$(command -v {t})" "{BIN}/{t}" $
+    }
+    for m in managers {
+        trust $ printf '#!/bin/sh\nexit 0\n' > "{BIN}/{m}"; chmod +x "{BIN}/{m}" $
+    }
+}
+
+fun detect_with(managers: [Text]): Text {
+    only(managers)
+    set_env("PATH", BIN)
+    const found = detect_package_manager()
+    set_env("PATH", REAL_PATH)
+    return found
+}
+
+fun hint_with(manager: Text, commands: [Text]): Text {
+    only([manager])
+    // The capture file is created and read with the real PATH; only the call
+    // under test sees the stub directory.
+    capture_start()
+    set_env("PATH", BIN)
+    print_install_hint(commands)
+    set_env("PATH", REAL_PATH)
+    return strip_colors(capture_stop())
+}
+
+test "detects each package manager" {
+    expect_eq("detects apt", "apt", detect_with(["apt-get"]))?
+    expect_eq("detects dnf", "dnf", detect_with(["dnf"]))?
+    expect_eq("detects pacman", "pacman", detect_with(["pacman"]))?
+    expect_eq("detects zypper", "zypper", detect_with(["zypper"]))?
+    expect_eq("detects apk", "apk", detect_with(["apk"]))?
+    expect_eq("detects xbps", "xbps", detect_with(["xbps-install"]))?
+}
+
+test "prefers rpm-ostree over dnf on an image-based system" {
+    expect_eq("rpm-ostree wins", "rpm-ostree", detect_with(["rpm-ostree", "dnf"]))?
+}
+
+test "recognises SteamOS ahead of its package manager" {
+    write_file(OS_RELEASE, "ID=steamos\nNAME=\"SteamOS\"\n")
+    expect_eq("steamos", "steamos", detect_with(["pacman"]))?
+}
+
+test "says unknown when it recognises nothing" {
+    expect_eq("unknown", "unknown", detect_with([Text]))?
+}
+
+test "maps commands to the packages that provide them" {
+    expect_eq("maps nsenter to the package that actually provides it", "util-linux", package_for("nsenter"))?
+    expect_eq("leaves a command that matches its package alone", "unzip", package_for("unzip"))?
+}
+
+test "gives an apt command for a Debian-like system" {
+    expect_contains("apt-get line", hint_with("apt-get", ["nsenter", "unzip"]), "sudo apt-get install -y util-linux unzip")?
+}
+
+test "gives a pacman command for an Arch-like system" {
+    expect_contains("pacman line", hint_with("pacman", ["nsenter"]), "sudo pacman -S --needed util-linux")?
+}
+
+test "tells an image-based system that a reboot is involved" {
+    const out = hint_with("rpm-ostree", ["nsenter"])
+    expect_contains("mentions the reboot", out, "reboot")?
+    expect_contains("and uses rpm-ostree rather than dnf there", out, "rpm-ostree install util-linux")?
+}
+
+test "warns that SteamOS resets its root filesystem" {
+    write_file(OS_RELEASE, "ID=steamos\n")
+    expect_contains("steamos-readonly", hint_with("pacman", ["nsenter"]), "steamos-readonly disable")?
+}
+
+test "does not pretend a distro package exists for protontricks" {
+    const out = hint_with("apt-get", ["protontricks"])
+    expect_not_contains("no apt-get line", out, "apt-get install")?
+    expect_contains("points at flatpak instead", out, "flatpak install")?
+    expect_contains("and at pipx as the alternative", out, "pipx install protontricks")?
+}
+
+test "handles a mix of protontricks and distro packages" {
+    const out = hint_with("dnf", ["protontricks", "unzip"])
+    expect_contains("dnf line for the package", out, "sudo dnf install -y unzip")?
+    expect_contains("and still covers protontricks in the same breath", out, "flatpak install")?
+}
+
+test "falls back to naming the packages when the system is unrecognised" {
+    expect_contains("names util-linux", hint_with("nothing-here", ["nsenter"]), "util-linux")?
+}

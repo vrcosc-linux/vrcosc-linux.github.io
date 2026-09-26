@@ -1,0 +1,25 @@
+// The application icon for the desktop entry.
+import { ICON_URL } from "constants.ab"
+import { DRY_RUN } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { file_exists, dirname, mkdir_p } from "util.ab"
+import { get_app_icon_path } from "paths.ab"
+
+pub fun install_application_icon(): Null {
+    log_info("Installing VRCOSC application icon...")
+    if DRY_RUN {
+        return null
+    }
+
+    const icon_path = get_app_icon_path()
+    mkdir_p(dirname(icon_path))
+    trust silent $ curl -fsSL --connect-timeout 10 -o "{icon_path}" "{ICON_URL}" $
+    if status() != 0 {
+        log_warn("Could not download the application icon; the desktop entry will use a fallback.")
+        trust $ rm -f "{icon_path}" $
+        return null
+    }
+    if file_exists(icon_path) {
+        log_success("Application icon installed: {icon_path}")
+    }
+}

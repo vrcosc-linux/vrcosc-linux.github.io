@@ -1,0 +1,125 @@
+// Where everything lives: launchers, desktop entries, the install directory
+// inside the prefix, VRCOSC's config directories and VRChat's game directory.
+import { VRCOSC_BRANCH, VRC_COMPATDATA, SCRIPT_SOURCE } from "state.ab"
+import { home, glob, path_exists, file_exists, dirname, have_cmd } from "util.ab"
+
+// The branch a per-channel path is for: the argument when given, else the one
+// being installed.
+fun branch_or_default(branch: Text): Text {
+    if branch == "" {
+        return VRCOSC_BRANCH
+    }
+    return branch
+}
+
+pub fun get_launcher_script(branch: Text = ""): Text {
+    if branch_or_default(branch) == "beta" {
+        return "{home()}/.local/bin/vrcosc-beta"
+    }
+    return "{home()}/.local/bin/vrcosc"
+}
+
+pub fun get_desktop_file(branch: Text = ""): Text {
+    if branch_or_default(branch) == "beta" {
+        return "{home()}/.local/share/applications/vrcosc-beta.desktop"
+    }
+    return "{home()}/.local/share/applications/vrcosc.desktop"
+}
+
+pub fun get_app_icon_path(): Text {
+    return "{home()}/.local/share/icons/hicolor/256x256/apps/vrcosc.png"
+}
+
+pub fun get_vrcosc_install_dir(branch: Text = ""): Text {
+    const base = "{VRC_COMPATDATA}/pfx/drive_c/users/steamuser/AppData/Local"
+    if branch_or_default(branch) == "beta" {
+        return "{base}/VRCOSC-beta"
+    }
+    return "{base}/VRCOSC"
+}
+
+// Every user directory in the prefix that holds config for the selected branch.
+// Steam prefixes routinely carry both steamuser and a real user name, and a user
+// may have pointed the directory somewhere else with a symlink.
+pub fun get_vrcosc_config_dirs(): [Text] {
+    // Both channels use the same directory. VRCOSC's APP_NAME is "VRCOSC" for every
+    // Release build and only becomes "VRCOSC-Dev" under #if DEBUG, so a beta install
+    // reads and writes the live settings; only the install directory differs. Looking
+    // for a VRCOSC-Beta directory meant --purge --branch beta reported success having
+    // matched nothing.
+    const leaf = "VRCOSC"
+    let dirs = [Text]
+    for d in glob("{VRC_COMPATDATA}/pfx/drive_c/users/*/AppData/Roaming/{leaf}") {
+        if path_exists(d) {
+            dirs += [d]
+        }
+    }
+    return dirs
+}
+
+pub fun get_vrchat_game_dir(): Text {
+    const steamapps_dir = dirname(dirname(VRC_COMPATDATA))
+    return "{steamapps_dir}/common/VRChat"
+}
+
+// Where a downloaded bridge payload is kept between runs.
+pub fun get_launch_bridge_cache(): Text {
+    return "{home()}/.local/share/vrcosc-linux/vrc-launch-bridge.exe"
+}
+
+// Directory install.sh itself lives in, or empty when there is no script file --
+// the normal case for a piped install.
+pub fun get_script_dir(): Text {
+    if not file_exists(SCRIPT_SOURCE) {
+        return ""
+    }
+    return trust $ cd "\$(dirname "{SCRIPT_SOURCE}")" && pwd $
+}
+
+// One path per element, so a $HOME containing a space survives.
+pub fun get_all_installed_files(): [Text] {
+    return [
+        get_launcher_script("live"),
+        get_launcher_script("beta"),
+        get_desktop_file("live"),
+        get_desktop_file("beta"),
+        get_app_icon_path()
+    ]
+}
+
+// True when two files have identical contents. cmp(1) comes from diffutils, which
+// minimal Fedora and Arch installs do not ship -- and a missing cmp reads as
+// "differs", which made the bridge look unpatched forever and re-patch on every
+// run. Falls back to a checksum, then to size.
+pub fun files_identical(a: Text, b: Text): Bool {
+    if not file_exists(a) or not file_exists(b) {
+        return false
+    }
+    // cmp answers 0 for identical and 1 for differing; any other status means it
+    // could not do the job (127 when it is not installed at all), so fall through
+    // rather than reporting a difference that was never measured.
+    trust silent $ cmp -s "{a}" "{b}" $
+    const rc = status()
+    if rc <= 1 {
+        return rc == 0
+    }
+    if have_cmd("sha256sum") {
+        return trust $ sha256sum < "{a}" $ == trust $ sha256sum < "{b}" $
+    }
+    return trust $ wc -c < "{a}" $ == trust $ wc -c < "{b}" $
+}
+
+pub fun get_vrcosc_version_from_dir(dir: Text): Text {
+    const deps = "{dir}/VRCOSC.deps.json"
+    const dll = "{dir}/VRCOSC.dll"
+    if file_exists(deps) {
+        const v = trust $ grep -o '"VRCOSC.App": "[^"]*"' "{deps}" 2>/dev/null | head -n 1 | cut -d'"' -f4 $
+        if v != "" {
+            return v
+        }
+    }
+    if file_exists(dll) {
+        return "Installed"
+    }
+    return "Not installed"
+}

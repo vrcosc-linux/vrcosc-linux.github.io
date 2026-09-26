@@ -1,0 +1,434 @@
+// The bridge payload has to be reachable in the way the README tells people to
+// install: `curl ... | bash`. There is no script file then, so a path derived
+// from BASH_SOURCE points at the caller's cwd and the patch is silently skipped.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, VRCOSC_BRANCH, DRY_RUN, PATCH_LAUNCH, RESOLVED_RUNTIME_MODE, LAUNCH_BRIDGE_SHA256, SCRIPT_SOURCE } from "../../src/state.ab"
+import { LAUNCH_BRIDGE_URLS } from "../../src/constants.ab"
+import { resolve_launch_bridge, launch_bridge_is_current, is_launch_bridge, patch_vrchat_launch_bridge, restore_vrchat_launch_bridge } from "../../src/bridge.ab"
+import { get_launch_bridge_cache, get_launcher_script, get_desktop_file, get_vrchat_game_dir, get_vrcosc_install_dir, files_identical } from "../../src/paths.ab"
+import { create_launchers } from "../../src/launcher.ab"
+import { uninstall_vrcosc } from "../../src/lifecycle.ab"
+import { parse_arguments } from "../../src/cli.ab"
+import { read_file, head_bytes, dirname, glob } from "../../src/util.ab"
+
+const REPO = repo_root()
+const WORK = work_dir()
+const BIN = "{WORK}/bin"
+set_home("{WORK}/home")
+const CACHE = get_launch_bridge_cache()
+const CURL_LOG = "{WORK}/curl.log"
+
+// Every download goes through the fake curl. The digest install.sh pins is for the
+// real payload; these tests serve a fake one, so point the pin at whatever the
+// fake curl is about to hand out.
+install_fake(BIN, "fake-curl", "curl")
+install_fake(BIN, "fake-protontricks", "protontricks")
+prepend_path(BIN)
+set_env("FAKE_CURL_LOG", CURL_LOG)
+
+fun expect_payload(payload: Text): Null {
+    set_text(LAUNCH_BRIDGE_SHA256, sha256_of_text(payload))
+}
+
+fun serve(payload: Text, status_code: Text): Null {
+    set_env("FAKE_CURL_BODY", payload)
+    set_env("FAKE_CURL_STATUS", status_code)
+    unset_env("FAKE_CURL_MATCH")
+    trust $ : > "{CURL_LOG}" $
+    expect_payload(payload)
+}
+
+// The first source (Pages) answers one way, every other source another.
+fun serve_split(pages_body: Text, pages_status: Text, other_body: Text): Null {
+    set_env("FAKE_CURL_MATCH", "vrcosc-linux.github.io")
+    set_env("FAKE_CURL_MATCH_BODY", pages_body)
+    set_env("FAKE_CURL_MATCH_STATUS", pages_status)
+    set_env("FAKE_CURL_BODY", other_body)
+    set_env("FAKE_CURL_STATUS", "0")
+    trust $ : > "{CURL_LOG}" $
+}
+
+let GAME_DIR = ""
+fun fresh_prefix(name: Text): Null {
+    set_text(VRC_COMPATDATA, make_prefix("{WORK}/{name}"))
+    set_text(GAME_DIR, get_vrchat_game_dir())
+}
+
+fun patch(): Text {
+    capture_start()
+    patch_vrchat_launch_bridge()
+    return capture_stop()
+}
+
+let RESTORED = false
+fun restore(): Text {
+    capture_start()
+    set_bool(RESTORED, restore_vrchat_launch_bridge())
+    return capture_stop()
+}
+
+fun make_launcher(): Text {
+    set_text(RESOLVED_RUNTIME_MODE, "no-bwrap")
+    set_text(VRCOSC_BRANCH, "live")
+    capture_start()
+    create_launchers() failed {}
+    capture_stop()
+    return get_launcher_script()
+}
+
+// Runs the generated launcher standalone; its stderr is returned.
+fun run_launcher(launcher: Text, extra_path: Text): Text {
+    const err = "{WORK}/launch.err"
+    trust $ : > "{WORK}/pt.log" $
+    trust $ env PATH="{extra_path}{BIN}:/usr/bin:/bin" FAKE_PT_LOG="{WORK}/pt.log" VRCOSC_JOIN=0 bash "{launcher}" >/dev/null 2>"{err}" $
+    return read_file(err)
+}
+
+fun uninstall(): Text {
+    capture_start()
+    uninstall_vrcosc()
+    return capture_stop()
+}
+
+// --- the shipped payload ----------------------------------------------------
+
+test "prefers the bridge sitting beside the script" {
+    set_text(SCRIPT_SOURCE, "{REPO}/install.sh")
+    expect_eq("resolves to bin/", "{REPO}/bin/vrc-launch-bridge.exe", resolve_launch_bridge())?
+}
+
+test "the shipped bridge is a real PE binary that carries its marker" {
+    const shipped = "{REPO}/bin/vrc-launch-bridge.exe"
+    expect_eq("the shipped bridge is a real PE binary", "MZ", head_bytes(shipped, 2))?
+    // The marker first existed only because the assembly happened to be named
+    // launch_bridge_ready. A rebuild that changed the assembly name dropped it, and
+    // nothing would have failed until a bridge got backed up over itself.
+    trust silent $ grep -aqF 'launch_bridge_ready' "{shipped}" $
+    expect_eq("the shipped bridge carries the marker the recursion guard greps for", "0", "{status()}")?
+    expect_true("and is_launch_bridge recognises it", is_launch_bridge(shipped))?
+    write_file("{WORK}/not-a-bridge.exe", "MZ stub launch.exe\n")
+    expect_false("and does not recognise something that is not a bridge", is_launch_bridge("{WORK}/not-a-bridge.exe"))?
+}
+
+test "the shipped bridge matches the digest install.sh pins" {
+    const shipped = "{REPO}/bin/vrc-launch-bridge.exe"
+    expect_eq("pin equals sha256sum of the file", trust $ sha256sum < "{shipped}" | awk '\{print \$1}' $, LAUNCH_BRIDGE_SHA256)?
+    expect_true("and launch_bridge_is_current agrees", launch_bridge_is_current(shipped))?
+}
+
+// From here on there is no script file at all -- the piped-install case, which is
+// what a test process looks like anyway.
+
+test "knows where to download from" {
+    expect_contains("tries the Pages URL before raw GitHub", LAUNCH_BRIDGE_URLS[0], "vrcosc-linux.github.io/bin/")?
+    expect_eq("has a second source to fall back to", "2", "{len(LAUNCH_BRIDGE_URLS)}")?
+}
+
+test "downloads the bridge when there is no script directory, then caches it" {
+    serve("MZfake-bridge-payload", "0")
+    expect_eq("downloads into the cache", CACHE, resolve_launch_bridge())?
+    expect_exists("caches the download for the next run", CACHE)?
+    trust $ : > "{CURL_LOG}" $
+    expect_eq("reuses the cache", CACHE, resolve_launch_bridge())?
+    expect_eq("without calling curl again", "", read_file(CURL_LOG))?
+}
+
+test "falls back to the second source when the first one fails" {
+    serve_split("", "22", "MZfrom-raw-github")
+    expect_payload("MZfrom-raw-github")
+    expect_eq("payload from raw GitHub", "MZfrom-raw-github", read_file(resolve_launch_bridge()))?
+}
+
+test "refuses a download that is not a PE binary" {
+    serve("<html>rate limited</html>", "0")
+    expect_eq("no bridge", "", resolve_launch_bridge())?
+    expect_eq("leaves no cache behind after refusing a bad download", "0", "{len(glob("{dirname(CACHE)}/*"))}")?
+}
+
+test "reports failure when curl itself fails" {
+    serve("MZwhatever", "22")
+    expect_eq("no bridge", "", resolve_launch_bridge())?
+}
+
+test "never downloads under --no-download or during a dry run" {
+    serve("MZfake-bridge-payload", "0")
+    expect_eq("never downloads under --no-download", "", resolve_launch_bridge(false))?
+    set_bool(DRY_RUN, true)
+    expect_eq("never downloads during a dry run", "", resolve_launch_bridge())?
+    expect_eq("and curl was never called", "", read_file(CURL_LOG))?
+}
+
+// --- patching ---------------------------------------------------------------
+
+test "patches a stock launch.exe from the resolved bridge" {
+    fresh_prefix("steam")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    expect_file_eq("patched", "{GAME_DIR}/launch.exe", "MZfake-bridge-payload")?
+    expect_file_eq("keeps a read-only backup of the original launcher", "{GAME_DIR}/launch.org.exe", "MZ stub launch.exe")?
+    patch()
+    expect_file_eq("is idempotent on a second patch", "{GAME_DIR}/launch.org.exe", "MZ stub launch.exe")?
+}
+
+// --- the generated launcher re-applies the patch ------------------------------
+// Steam restores the stock launch.exe on update or validation, so a one-shot
+// patch at install time decays; the launcher runs before every session.
+
+test "the launcher restores the bridge after Steam replaces launch.exe" {
+    fresh_prefix("steam")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    const launcher = make_launcher()
+    expect_contains("generates a launcher that knows where the bridge payload is", read_file(launcher), "BRIDGE_PAYLOAD=\"{CACHE}\"")?
+    expect_eq("the launcher is still syntactically valid", "", trust $ bash -n "{launcher}" 2>&1 $)?
+
+    trust $ chmod 755 "{GAME_DIR}/launch.exe" $
+    write_file("{GAME_DIR}/launch.exe", "MZ stock launcher restored by Steam\n")
+    const err = run_launcher(launcher, "")
+    expect_file_eq("restores the bridge", "{GAME_DIR}/launch.exe", "MZfake-bridge-payload")?
+    expect_contains("and says so", err, "re-applied VRChat's launch.exe bridge")?
+
+    expect_not_contains("does not touch an already-bridged launch.exe", run_launcher(launcher, ""), "re-applied")?
+    expect_file_eq("keeps the original backup across a re-patch", "{GAME_DIR}/launch.org.exe", "MZ stub launch.exe")?
+
+    trust $ rm -rf "{GAME_DIR}" $
+    run_launcher(launcher, "")
+    expect_contains("still starts VRCOSC when the game directory has vanished", read_file("{WORK}/pt.log"), "VRCOSC.dll")?
+}
+
+// --- hosts without diffutils --------------------------------------------------
+// Minimal Fedora and Arch images have no cmp(1). A missing cmp used to read as
+// "the files differ", so the bridge looked permanently unpatched and both the
+// installer and the launcher rewrote launch.exe on every single run.
+
+test "files_identical works without cmp" {
+    stub_missing("{WORK}/nocmp", "cmp")
+    write_file("{WORK}/a", "same\n")
+    write_file("{WORK}/b", "same\n")
+    write_file("{WORK}/c", "other\n")
+    const real_path = trust $ printf '%s' "\$PATH" $
+    set_env("PATH", "{WORK}/nocmp:{real_path}")
+    expect_true("sees identical files as identical without cmp", files_identical("{WORK}/a", "{WORK}/b"))?
+    expect_false("still sees differing files as different without cmp", files_identical("{WORK}/a", "{WORK}/c"))?
+    set_env("PATH", real_path)
+    expect_false("treats a missing file as not identical", files_identical("{WORK}/a", "{WORK}/does-not-exist"))?
+}
+
+test "the launcher does not re-patch on a host without cmp" {
+    fresh_prefix("steam2")
+    serve("MZfake-bridge-payload", "0")
+    stub_missing("{WORK}/nocmp", "cmp")
+    const launcher = make_launcher()
+    run_launcher(launcher, "{WORK}/nocmp:")
+    expect_not_contains("second run does not re-patch", run_launcher(launcher, "{WORK}/nocmp:"), "re-applied")?
+}
+
+// --- --no-patch ---------------------------------------------------------------
+// Patching writes into VRChat's own install directory, so it must be refusable.
+
+test "leaves launch.exe alone under --no-patch" {
+    fresh_prefix("steam3")
+    serve("MZfake-bridge-payload", "0")
+    set_bool(PATCH_LAUNCH, false)
+    const out = patch()
+    expect_file_eq("untouched", "{GAME_DIR}/launch.exe", "MZ stub launch.exe")?
+    expect_contains("and says which flag did that", out, "--no-patch")?
+    expect_missing("makes no backup it did not need", "{GAME_DIR}/launch.org.exe")?
+
+    const launcher = make_launcher()
+    expect_contains("generates a launcher with no payload to re-patch from", read_file(launcher), "BRIDGE_PAYLOAD=\"\"")?
+    const err = run_launcher(launcher, "")
+    expect_file_eq("and that launcher does not touch launch.exe", "{GAME_DIR}/launch.exe", "MZ stub launch.exe")?
+    expect_not_contains("and still starts VRCOSC", err, "re-applied")?
+    expect_contains("via protontricks", read_file("{WORK}/pt.log"), "VRCOSC.dll")?
+
+    set_bool(PATCH_LAUNCH, true)
+    patch()
+    expect_eq("patches by default", read_file(CACHE), read_file("{GAME_DIR}/launch.exe"))?
+}
+
+test "the patch flags are parsed" {
+    set_bool(PATCH_LAUNCH, true)
+    parse_arguments(["--no-patch"])
+    expect_false("--no-patch turns patching off", PATCH_LAUNCH)?
+    set_bool(PATCH_LAUNCH, true)
+    parse_arguments(["--no-firewall"])
+    expect_true("patching is on when nothing says otherwise", PATCH_LAUNCH)?
+    // --patch and --path were the documented spelling for a few hours.
+    set_bool(PATCH_LAUNCH, false)
+    parse_arguments(["--patch"])
+    expect_true("still accepts --patch", PATCH_LAUNCH)?
+    set_bool(PATCH_LAUNCH, false)
+    parse_arguments(["--path"])
+    expect_true("and --path", PATCH_LAUNCH)?
+}
+
+// --- uninstall puts VRChat's own launcher back --------------------------------
+
+test "restores the original launch.exe and removes its backup" {
+    fresh_prefix("un1")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    restore()
+    expect_file_eq("restored", "{GAME_DIR}/launch.exe", "MZ stub launch.exe")?
+    expect_missing("and removes its own backup afterwards", "{GAME_DIR}/launch.org.exe")?
+    expect_contains("leaves the restored launcher executable", trust $ stat -c '%A' "{GAME_DIR}/launch.exe" $, "x")?
+}
+
+test "does nothing when there is no backup to restore from" {
+    fresh_prefix("un3")
+    serve("MZfake-bridge-payload", "0")
+    restore()
+    expect_false("reports nothing done", RESTORED)?
+    expect_file_eq("and leaves that untouched launch.exe alone", "{GAME_DIR}/launch.exe", "MZ stub launch.exe")?
+}
+
+test "keeps a launch.exe that is not our bridge but drops the stale backup" {
+    fresh_prefix("un4")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    trust $ chmod 755 "{GAME_DIR}/launch.exe" $
+    write_file("{GAME_DIR}/launch.exe", "MZ newer stock launcher from a game update\n")
+    restore()
+    expect_file_eq("keeps it", "{GAME_DIR}/launch.exe", "MZ newer stock launcher from a game update")?
+    expect_missing("but drops the backup that is now stale", "{GAME_DIR}/launch.org.exe")?
+}
+
+test "reports what it would do under --dry-run without doing it" {
+    fresh_prefix("un5")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    set_bool(DRY_RUN, true)
+    const out = restore()
+    expect_contains("says so", out, "Would restore")?
+    expect_exists("and really left it patched", "{GAME_DIR}/launch.org.exe")?
+}
+
+test "a full uninstall restores the launcher and clears the cached payload" {
+    fresh_prefix("un6")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    make_launcher()
+    uninstall()
+    expect_file_eq("stock launcher back", "{GAME_DIR}/launch.exe", "MZ stub launch.exe")?
+    expect_missing("and the cached payload is gone", CACHE)?
+    expect_missing("and so is the launcher script", get_launcher_script())?
+}
+
+// --- --uninstall --dry-run must not uninstall ----------------------------------
+// It used to: uninstall_vrcosc never looked at DRY_RUN, so a "simulated"
+// uninstall deleted the install directory, the launcher, the desktop entry and
+// the icon for real. This cost a real user their installed build.
+
+test "a dry-run uninstall keeps everything, a real one removes it" {
+    fresh_prefix("dry1")
+    serve("MZfake-bridge-payload", "0")
+    const app_dir = get_vrcosc_install_dir()
+    write_file("{app_dir}/VRCOSC.dll", "app\n")
+    patch()
+    make_launcher()
+    set_bool(DRY_RUN, true)
+    const out = uninstall()
+    expect_exists("a dry-run uninstall keeps the install directory", "{app_dir}/VRCOSC.dll")?
+    expect_exists("and keeps the launcher script", get_launcher_script())?
+    expect_exists("and keeps the desktop entry", get_desktop_file())?
+    expect_exists("and keeps the patched launch.exe", "{GAME_DIR}/launch.org.exe")?
+    expect_exists("and keeps the cached bridge payload", CACHE)?
+    expect_contains("and says it removed nothing", out, "nothing was removed")?
+    set_bool(DRY_RUN, false)
+    uninstall()
+    expect_missing("while a real uninstall does remove the install directory", "{app_dir}/VRCOSC.dll")?
+}
+
+// --- a cached bridge must not be kept forever ---------------------------------
+// resolve_launch_bridge used to return any cached file that existed, so anyone who
+// installed the documented `curl | bash` way kept the first bridge they ever
+// fetched. Only people who cloned the repo received updates.
+
+test "a stale cache is replaced rather than reused" {
+    trust $ mkdir -p "{dirname(CACHE)}" $
+    write_file(CACHE, "MZan-old-bridge-from-2024")
+    serve("MZthe-current-bridge", "0")
+    expect_eq("replaced", "MZthe-current-bridge", read_file(resolve_launch_bridge()))?
+    trust $ : > "{CURL_LOG}" $
+    expect_eq("a current cache is still reused", "MZthe-current-bridge", read_file(resolve_launch_bridge()))?
+    expect_eq("without calling curl", "", read_file(CURL_LOG))?
+}
+
+test "a source serving a build behind main is skipped for the next source" {
+    // Pages can lag the repository; the raw.githubusercontent fallback only means
+    // something if a wrong payload is recognised as wrong.
+    serve_split("MZa-stale-pages-build", "0", "MZthe-newest-bridge")
+    expect_payload("MZthe-newest-bridge")
+    expect_eq("newest wins", "MZthe-newest-bridge", read_file(resolve_launch_bridge()))?
+}
+
+test "when every source disagrees, a stale cache beats no bridge at all" {
+    trust $ mkdir -p "{dirname(CACHE)}" $
+    write_file(CACHE, "MZan-old-bridge")
+    serve("MZwhat-the-sources-serve", "0")
+    expect_payload("MZsomething-no-source-serves")
+    expect_eq("stale cache used", "MZan-old-bridge", read_file(resolve_launch_bridge()))?
+    trust $ rm -f "{CACHE}" $
+    expect_eq("and with no cache either, it still refuses rather than install a wrong payload", "", resolve_launch_bridge())?
+}
+
+test "a host without sha256sum is not locked out of installing" {
+    stub_missing("{WORK}/nosha", "sha256sum")
+    trust $ mkdir -p "{dirname(CACHE)}" $
+    write_file(CACHE, "MZwhatever-is-cached")
+    serve("MZfake-bridge-payload", "0")
+    prepend_path("{WORK}/nosha")
+    expect_eq("cached payload accepted", "MZwhatever-is-cached", read_file(resolve_launch_bridge()))?
+}
+
+// --- the bridge must never become its own fallback ----------------------------
+// launch.org.exe is what RunOriginal() starts. If it is a bridge, that call
+// re-enters the bridge, which calls RunOriginal() again, with no bound -- and it
+// happens on every launch where the pipe is unavailable, i.e. VRChat not running.
+
+test "refuses to back up a launch.exe that is already a bridge" {
+    fresh_prefix("steam-recursion")
+    serve("MZfake-bridge-payload", "0")
+    // The payload embeds this marker; a different bridge build carries it too, which
+    // is why comparing against the current payload is not enough on its own.
+    write_file("{GAME_DIR}/launch.exe", "MZ an older launch_bridge_ready build\n")
+    const out = patch()
+    expect_missing("no backup made", "{GAME_DIR}/launch.org.exe")?
+    expect_contains("and says the stock launcher has to come from Steam", out, "Verify integrity of game files")?
+    expect_file_eq("and leaves launch.exe as it found it, rather than half-patching", "{GAME_DIR}/launch.exe", "MZ an older launch_bridge_ready build")?
+}
+
+test "refreshes a backup that VRChat has since updated past" {
+    // Steam restores a NEW stock launch.exe on a game update. Keeping the old backup
+    // would leave the bridge falling back to a launcher VRChat no longer ships.
+    fresh_prefix("steam-refresh")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    trust $ chmod 755 "{GAME_DIR}/launch.exe" $
+    write_file("{GAME_DIR}/launch.exe", "MZ stub launch.exe v2\n")
+    patch()
+    expect_file_eq("backup refreshed", "{GAME_DIR}/launch.org.exe", "MZ stub launch.exe v2")?
+    patch()
+    expect_file_eq("and leaves the backup alone when the bridge is simply already in place", "{GAME_DIR}/launch.org.exe", "MZ stub launch.exe v2")?
+}
+
+test "a stock launch.exe is still backed up normally" {
+    fresh_prefix("steam-stock")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    expect_file_eq("backed up", "{GAME_DIR}/launch.org.exe", "MZ stub launch.exe")?
+}
+
+test "uninstall refuses to restore a backup that is itself a bridge" {
+    fresh_prefix("steam-bogus")
+    serve("MZfake-bridge-payload", "0")
+    patch()
+    // The installer leaves these 444/555, so make them writable to stage the scenario.
+    trust $ chmod 644 "{GAME_DIR}/launch.org.exe" "{GAME_DIR}/launch.exe" $
+    write_file("{GAME_DIR}/launch.org.exe", "MZ a launch_bridge_ready build\n")
+    write_file("{GAME_DIR}/launch.exe", "MZfake-bridge-payload")
+    const out = restore()
+    expect_contains("says so", out, "itself a launch bridge")?
+    expect_missing("and drops the bogus backup rather than leaving it to be trusted later", "{GAME_DIR}/launch.org.exe")?
+}

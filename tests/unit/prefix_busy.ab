@@ -1,0 +1,52 @@
+// Users reported VRCOSC dying inside Velopack's updater ("Access denied" out of
+// EnumProcessModules) when VRChat was already running in the same prefix. Testing
+// on a live system showed the two DO often run together, so this is reported as a
+// note rather than enforced -- but it must be reported, and it must match how both
+// Proton and protontricks spell WINEPREFIX (Proton adds a trailing slash).
+import * from "../lib/harness.ab"
+
+const WORK = work_dir()
+const HOME_DIR = "{WORK}/home"
+const BIN = "{WORK}/bin"
+trust $ mkdir -p "{HOME_DIR}" $
+install_fake(BIN, "fake-protontricks", "protontricks")
+const PREFIX = make_prefix("{WORK}/steam", ["--dotnet", "10.0.1", "--tfm", "net10.0"])
+
+fun run(args: [Text]): Text {
+    return run_install(BIN, HOME_DIR, ["FAKE_PT_LOG={WORK}/pt.log", "FAKE_PT_PREFIX={PREFIX}"], ["--prefix", PREFIX] + args)
+}
+
+// Stand in for VRChat's wineserver: any process whose environment claims this
+// prefix is, as far as wine is concerned, the session owner.
+fun start_holder(wineprefix: Text): Text {
+    return start_named_process(WORK, "wineserver", ["WINEPREFIX={wineprefix}"])
+}
+
+test "reports an idle prefix as idle" {
+    expect_contains("idle", run(["--info"]), "None (prefix idle)")?
+}
+
+test "--info counts the wine processes in the prefix" {
+    start_holder("{PREFIX}/pfx")
+    expect_contains("counted", run(["--info"]), "Wine Processes In Prefix")?
+}
+
+test "the installer warns about a non-VRChat session but does not refuse" {
+    start_holder("{PREFIX}/pfx")
+    const out = run(["--dry-run", "--no-firewall"])
+    expect_contains("warns", out, "already running in this prefix")?
+    expect_eq("but exits 0", "0", "{LAST_RC}")?
+}
+
+test "detects a holder that spells WINEPREFIX with a trailing slash, as Proton does" {
+    // Proton exports WINEPREFIX=<path>/ ; protontricks exports it without the slash.
+    // Matching only one spelling made the check miss VRChat entirely.
+    start_holder("{PREFIX}/pfx/")
+    expect_contains("warns", run(["--dry-run", "--no-firewall"]), "already running in this prefix")?
+}
+
+test "says nothing about a busy prefix once it is free" {
+    const holder = start_holder("{PREFIX}/pfx")
+    stop_process(holder)
+    expect_not_contains("quiet", run(["--dry-run", "--no-firewall"]), "already running in this prefix")?
+}

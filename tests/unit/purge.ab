@@ -1,0 +1,106 @@
+// --purge deletes settings, which is unrecoverable, so the dry-run guarantee and
+// the "only our own directories" rule are the whole point of this suite.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, VRCOSC_BRANCH, DRY_RUN, PURGE_MODE } from "../../src/state.ab"
+import { get_vrcosc_config_dirs } from "../../src/paths.ab"
+import { purge_vrcosc_config } from "../../src/lifecycle.ab"
+import { print_usage, parse_arguments } from "../../src/cli.ab"
+import { join_words } from "../../src/util.ab"
+
+const WORK = work_dir()
+let USERS = ""
+
+// A prefix with config for live, beta and a directory we never created, for two
+// users -- the shape a real Steam prefix has.
+fun setup(name: Text): Null {
+    set_text(VRC_COMPATDATA, make_prefix("{WORK}/{name}"))
+    USERS = "{VRC_COMPATDATA}/pfx/drive_c/users"
+    for u in ["steamuser", "someone"] {
+        trust $ mkdir -p "{USERS}/{u}/AppData/Roaming/VRCOSC/configuration" \
+                 "{USERS}/{u}/AppData/Roaming/VRCOSC-Beta" \
+                 "{USERS}/{u}/AppData/Roaming/VRCOSC-Dev" $
+        write_file("{USERS}/{u}/AppData/Roaming/VRCOSC/configuration/config.json", "settings\n")
+        write_file("{USERS}/{u}/AppData/Roaming/VRCOSC-Beta/config.json", "beta\n")
+        write_file("{USERS}/{u}/AppData/Roaming/VRCOSC-Dev/config.json", "not ours\n")
+    }
+}
+
+fun purge(): Text {
+    capture_start()
+    purge_vrcosc_config()
+    return capture_stop()
+}
+
+test "finds the config directory for every user in the prefix" {
+    setup("find1")
+    expect_eq("two users", "2", "{len(get_vrcosc_config_dirs())}")?
+}
+
+// VRCOSC's APP_NAME is "VRCOSC" for every Release build, so a beta install reads
+// and writes the live settings. Looking for VRCOSC-Beta matched nothing and made
+// --purge --branch beta claim success while deleting nothing.
+test "uses the same directory for beta, because the app does" {
+    setup("same")
+    const live = join_words(get_vrcosc_config_dirs())
+    set_text(VRCOSC_BRANCH, "beta")
+    const beta = join_words(get_vrcosc_config_dirs())
+    expect_eq("same directories", live, beta)?
+    expect_not_contains("and does not go looking for a VRCOSC-Beta directory", beta, "VRCOSC-Beta")?
+}
+
+test "warns that purging beta takes the live settings with it" {
+    setup("betawarn")
+    set_text(VRCOSC_BRANCH, "beta")
+    set_bool(DRY_RUN, true)
+    expect_contains("warning", purge(), "shares its settings with the live install")?
+}
+
+test "a dry-run purge deletes nothing" {
+    setup("dry1")
+    set_bool(DRY_RUN, true)
+    const out = purge()
+    expect_exists("config still there", "{USERS}/steamuser/AppData/Roaming/VRCOSC/configuration/config.json")?
+    expect_contains("and says nothing was touched", out, "nothing was touched")?
+    expect_contains("and still lists what it would delete", out, "AppData/Roaming/VRCOSC")?
+}
+
+test "a real purge deletes the live config for every user" {
+    setup("real1")
+    purge()
+    expect_missing("steamuser config gone", "{USERS}/steamuser/AppData/Roaming/VRCOSC")?
+    expect_missing("someone config gone", "{USERS}/someone/AppData/Roaming/VRCOSC")?
+    expect_exists("leaves a hand-made VRCOSC-Beta directory alone", "{USERS}/steamuser/AppData/Roaming/VRCOSC-Beta/config.json")?
+    expect_exists("and never touches a directory it did not create", "{USERS}/steamuser/AppData/Roaming/VRCOSC-Dev/config.json")?
+}
+
+test "follows a symlinked config directory to its target" {
+    setup("link1")
+    const target = "{WORK}/elsewhere/VRCOSC"
+    trust $ mkdir -p "{target}" $
+    write_file("{target}/config.json", "cloud settings\n")
+    trust $ rm -rf "{USERS}/steamuser/AppData/Roaming/VRCOSC" $
+    trust $ ln -s "{target}" "{USERS}/steamuser/AppData/Roaming/VRCOSC" $
+    const out = purge()
+    expect_missing("target deleted", "{target}/config.json")?
+    expect_missing("and removes the dangling link as well", "{USERS}/steamuser/AppData/Roaming/VRCOSC")?
+    expect_contains("and warns that the symlink target is going too", out, "which will be deleted too")?
+}
+
+test "says so when there is no config to purge" {
+    setup("none1")
+    trust $ rm -rf "{USERS}"/*/AppData/Roaming/VRCOSC $
+    expect_contains("nothing to purge", purge(), "nothing to purge")?
+}
+
+test "--purge is documented and parsed" {
+    capture_start()
+    print_usage()
+    const usage = capture_stop()
+    expect_contains("--purge is documented", usage, "--purge")?
+    set_bool(PURGE_MODE, false)
+    parse_arguments(["--purge"])
+    expect_true("--purge sets purge mode", PURGE_MODE)?
+    set_bool(PURGE_MODE, false)
+    parse_arguments(["--dry-run"])
+    expect_false("and is off by default", PURGE_MODE)?
+}

@@ -1,0 +1,86 @@
+// Black-box tests: run install.sh as a user would, against a synthetic prefix
+// and a fake protontricks, with $HOME redirected so nothing touches the real one.
+import * from "../lib/harness.ab"
+
+const WORK = work_dir()
+const HOME_DIR = "{WORK}/home"
+const BIN = "{WORK}/bin"
+install_fake(BIN, "fake-protontricks", "protontricks")
+trust $ mkdir -p "{HOME_DIR}" $
+const PREFIX = make_prefix("{WORK}/steam", ["--dotnet", "9.0.14", "--tfm", "net9.0-windows"])
+
+// Runs install.sh in a sealed environment against PREFIX. Extra env goes in as
+// NAME=value entries.
+fun run(env_vars: [Text], args: [Text]): Text {
+    return run_install(BIN, HOME_DIR, ["FAKE_PT_LOG={WORK}/pt.log", "FAKE_PT_PREFIX={PREFIX}"] + env_vars, ["--prefix", PREFIX] + args)
+}
+
+test "--help exits successfully and documents the flags" {
+    const out = run([Text], ["--help"])
+    expect_eq("exits 0", "0", "{LAST_RC}")?
+    expect_contains("documents --runtime", out, "--runtime <MODE>")?
+    expect_contains("documents how to refuse the launch.exe patch", out, "--no-patch")?
+    expect_contains("documents the firewall flag under its current name", out, "--no-firewall")?
+}
+
+test "rejects an unknown --runtime value" {
+    const out = run([Text], ["--runtime", "nonsense"])
+    expect_true("exits non-zero", LAST_RC != 0)?
+    expect_contains("explains which --runtime values are valid", out, "auto, no-bwrap, host, container")?
+}
+
+test "--info runs to completion when protontricks --version fails" {
+    // Regression: the ERR trap plus pipefail used to abort the report right after
+    // the tooling header, which is exactly what a tester's log showed.
+    const out = run(["FAKE_PT_PROFILE=version-fails"], ["--info"])
+    expect_contains("reaches the last section", out, "=== Community & Support ===")?
+    expect_contains("still reports the prefix", out, "=== VRChat Proton Prefix ===")?
+}
+
+test "--info names the Proton build and the satisfied runtime" {
+    const out = run([Text], ["--info"])
+    expect_contains("names the Proton build from config_info", out, "proton-rtsp-11.0-20260609-4")?
+    expect_contains("flags the .NET runtime the app needs as satisfied", out, "9.0.x (satisfied)")?
+}
+
+test "--info flags leaked Steam Runtime variables" {
+    const out = run(["LD_LIBRARY_PATH=/runtime/lib"], ["--info"])
+    expect_contains("names the variable", out, "LD_LIBRARY_PATH")?
+}
+
+test "--info marks a fontconfig-broken runtime mode as broken" {
+    const out = run(["FAKE_PT_PROFILE=fontconfig-mismatch"], ["--info"])
+    expect_contains("shows the fontconfig noise", out, "out of memory")?
+    expect_contains("reports host mode as the working one on such a host", out, "Runtime [host     ]")?
+}
+
+test "--dry-run writes no launcher" {
+    run([Text], ["--dry-run", "--no-firewall"])
+    expect_missing("no launcher under \$HOME", "{HOME_DIR}/.local/bin/vrcosc")?
+}
+
+test "--info warns when the app needs a runtime the prefix lacks" {
+    const wrong = make_prefix("{WORK}/steam-wrong", ["--dotnet", "10.0.7", "--tfm", "net9.0-windows"])
+    const out = run_install(BIN, HOME_DIR, ["FAKE_PT_LOG={WORK}/pt.log"], ["--prefix", wrong, "--info"])
+    expect_contains("says the runtime is missing", out, "9.0.x (MISSING")?
+}
+
+test "--dry-run survives with no network at all" {
+    // Regression: install_vrcosc() curled GitHub before honouring DRY_RUN, so an
+    // offline --dry-run died with a bare curl exit code through the ERR trap.
+    const out = run(["http_proxy=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9"], ["--dry-run", "--no-firewall"])
+    expect_eq("exits 0", "0", "{LAST_RC}")?
+    expect_contains("says why it skipped the download when offline", out, "Dry run: could not reach")?
+}
+
+// --- --no-firewall still reports ----------------------------------------------
+// Refusing to change the firewall is not the same as refusing to look at it: a
+// blocked 9001 looks exactly like VRCOSC not working.
+test "--no-firewall still inspects the firewall" {
+    const out = run([Text], ["--dry-run", "--no-firewall"])
+    expect_contains("inspects", out, "Checking firewall configuration")?
+    expect_contains("and says it is adding nothing", out, "Not adding any firewall rules")?
+    // On a host with no firewall tool at all it must still say which ports it could
+    // not check -- a reader of this output is trying to find out if 9001 is blocked.
+    expect_contains("and names the ports either way", out, "9001/udp")?
+}

@@ -1,0 +1,106 @@
+// Finding the VRChat (438100) Proton prefix.
+import { INSTALL_URL, VRCHAT_APP_ID } from "constants.ab"
+import { VRC_COMPATDATA } from "state.ab"
+import { log_info, log_success, log_warn, log_error } from "log.ab"
+import { home, dir_exists, file_exists, nonempty_lines, strip_prefix, stdin_is_tty, contains } from "util.ab"
+import { starts_with } from "std/text"
+import { input_prompt } from "std/env"
+
+// "~/..." with the tilde expanded, as a shell would have done for an unquoted path.
+fun expand_tilde(path: Text): Text {
+    if starts_with(path, "~") {
+        return home() + strip_prefix(path, "~")
+    }
+    return path
+}
+
+// Every library path a libraryfolders.vdf names.
+fun library_paths_from(vdf: Text): [Text] {
+    if not file_exists(vdf) {
+        return [Text]
+    }
+    const found = trust $ grep -oE '"path"[[:space:]]*"[^"]+"' "{vdf}" 2>/dev/null | sed 's/.*"\([^"]*\)"\$/\1/' $
+    return nonempty_lines(found)
+}
+
+pub fun find_prefix_silently(): Bool {
+    if VRC_COMPATDATA != "" {
+        VRC_COMPATDATA = expand_tilde(VRC_COMPATDATA)
+        if dir_exists("{VRC_COMPATDATA}/pfx") {
+            return true
+        }
+        if dir_exists("{VRC_COMPATDATA}/compatdata/{VRCHAT_APP_ID}/pfx") {
+            VRC_COMPATDATA = "{VRC_COMPATDATA}/compatdata/{VRCHAT_APP_ID}"
+            return true
+        }
+    }
+
+    const h = home()
+    let candidate_paths = [
+        "{h}/.local/share/Steam",
+        "{h}/.steam/steam",
+        "{h}/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "{h}/.var/app/com.valvesoftware.Steam/.steam/steam",
+        "/run/media/system/Data/Games/Steam",
+        "/media/media-automount/Data/Games/Steam"
+    ]
+
+    for vdf in [
+        "{h}/.local/share/Steam/steamapps/libraryfolders.vdf",
+        "{h}/.steam/steam/steamapps/libraryfolders.vdf",
+        "{h}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/libraryfolders.vdf"
+    ] {
+        candidate_paths += library_paths_from(vdf)
+    }
+
+    for p in candidate_paths {
+        for check_dir in [p, "{p}/steamapps"] {
+            if dir_exists("{check_dir}/compatdata/{VRCHAT_APP_ID}/pfx") {
+                VRC_COMPATDATA = "{check_dir}/compatdata/{VRCHAT_APP_ID}"
+                return true
+            }
+        }
+    }
+    return false
+}
+
+pub fun locate_vrchat_prefix(): Null {
+    log_info("Locating VRChat Proton prefix...")
+
+    if find_prefix_silently() {
+        log_success("Found VRChat compatibility data at: {VRC_COMPATDATA}")
+        return null
+    }
+
+    // Fallback to interactive user input if available
+    log_warn("Could not automatically locate the VRChat ({VRCHAT_APP_ID}) Proton prefix.")
+    if stdin_is_tty() {
+        while VRC_COMPATDATA == "" {
+            log_info("Please enter the path to your SteamLibrary or the {VRCHAT_APP_ID} compatdata folder:")
+            const user_path = expand_tilde(input_prompt("Path: "))
+
+            if {
+                dir_exists("{user_path}/pfx") and contains(user_path, VRCHAT_APP_ID) {
+                    VRC_COMPATDATA = user_path
+                }
+                dir_exists("{user_path}/compatdata/{VRCHAT_APP_ID}/pfx") {
+                    VRC_COMPATDATA = "{user_path}/compatdata/{VRCHAT_APP_ID}"
+                }
+                dir_exists("{user_path}/steamapps/compatdata/{VRCHAT_APP_ID}/pfx") {
+                    VRC_COMPATDATA = "{user_path}/steamapps/compatdata/{VRCHAT_APP_ID}"
+                }
+                else {
+                    log_error("Invalid path. Could not find 'pfx' folder for app {VRCHAT_APP_ID} under '{user_path}'. Please try again.")
+                }
+            }
+        }
+        log_success("Using VRChat prefix at: {VRC_COMPATDATA}")
+    } else {
+        // A piped install has no TTY, so the prompt above never appears. Say how to
+        // pass the flag through a pipe, where bare flags would go to bash instead.
+        log_error("Error: Running non-interactively and prefix was not found.")
+        echo("Pass --prefix <PATH> explicitly:")
+        echo("  curl -sSL {INSTALL_URL} | bash -s -- --prefix /path/to/compatdata/{VRCHAT_APP_ID}")
+        exit(1)
+    }
+}

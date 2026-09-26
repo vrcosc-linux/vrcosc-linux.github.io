@@ -1,0 +1,309 @@
+// Proton / Steam Runtime environment hygiene: which protontricks flags to use,
+// scrubbing leaked runtime variables, and what is currently holding the prefix.
+import { BOLD, YELLOW, CYAN, NC, CONTAMINATING_ENV_VARS, RUNTIME_MODE_CANDIDATES, VRCHAT_APP_ID } from "constants.ab"
+import { VRC_COMPATDATA, RUNTIME_MODE, RESOLVED_RUNTIME_MODE, DRY_RUN } from "state.ab"
+import { log_info, log_success, log_warn, log_error } from "log.ab"
+import { env_is_set, nonempty_lines, read_file, file_exists, first_line, matches, first_match, join_words, strip_suffix, dirname } from "util.ab"
+
+// The names of contaminating variables that are currently set.
+pub fun list_contaminated_env(): [Text] {
+    let leaked = [Text]
+    for v in CONTAMINATING_ENV_VARS {
+        if env_is_set(v) {
+            leaked += [v]
+        }
+    }
+    return leaked
+}
+
+// Maps a runtime mode onto the protontricks flags that implement it.
+pub fun runtime_mode_flags(mode: Text): Text {
+    if {
+        mode == "no-bwrap": return "--no-bwrap"
+        mode == "host": return "--no-runtime"
+        mode == "container": return ""
+    }
+    return "--no-bwrap"
+}
+
+// "-u VAR -u VAR ...": the env(1) arguments that drop every contaminating variable.
+pub fun scrub_arguments(): Text {
+    let parts = [Text]
+    for v in CONTAMINATING_ENV_VARS {
+        parts += ["-u", v]
+    }
+    return join_words(parts)
+}
+
+// The mode every wine call uses: the probed one, else the requested one, with
+// "auto" meaning no-bwrap when nothing has been probed yet.
+fun effective_runtime_mode(): Text {
+    let mode = RESOLVED_RUNTIME_MODE
+    if mode == "" {
+        mode = RUNTIME_MODE
+    }
+    if mode == "auto" {
+        mode = "no-bwrap"
+    }
+    return mode
+}
+
+// Runs a wine command inside the VRChat prefix with a sanitised environment.
+// Every protontricks invocation in this script goes through here so the runtime
+// mode and the environment scrubbing are configured in exactly one place. Output
+// goes wherever ours does; a failure is the caller's to handle.
+pub fun run_in_prefix(command: Text): Null? {
+    const flags = runtime_mode_flags(effective_runtime_mode())
+    const scrub = scrub_arguments()
+    $ env {scrub} timeout 0 protontricks {flags} -c "{command}" {VRCHAT_APP_ID} $?
+}
+
+// The same, capturing combined output for inspection. Sets the status the way a
+// command would; the output is returned whether or not the command succeeded,
+// because the diagnosis is in the failure text.
+#[allow_public_mutable]
+pub let LAST_PREFIX_OUTPUT = ""
+#[allow_public_mutable]
+pub let LAST_PREFIX_STATUS = 0
+pub fun run_in_prefix_captured(command: Text, mode: Text, timeout_secs: Int): Bool {
+    const flags = runtime_mode_flags(mode)
+    const scrub = scrub_arguments()
+    const capture = trust $ mktemp $
+    trust $ env {scrub} timeout {timeout_secs} protontricks {flags} -c "{command}" {VRCHAT_APP_ID} > "{capture}" 2>&1 $
+    LAST_PREFIX_STATUS = status()
+    LAST_PREFIX_OUTPUT = read_file(capture)
+    trust $ rm -f "{capture}" $
+    return LAST_PREFIX_STATUS == 0
+}
+
+// True when wine output shows a broken library/config environment rather than a
+// genuine application failure.
+pub fun prefix_output_is_broken(output: Text): Bool {
+    return matches(output, "Fontconfig error|error while loading shared libraries|wine: (failed|cannot|could not)")
+}
+
+// Processes currently holding this prefix, as "<pid> <name>" lines.
+//
+// A wine prefix can only be owned by one wineserver at a time, and Steam's Proton
+// and a protontricks-launched wine set that session up differently -- different
+// environment, different container, no Proton session handshake. Whichever starts
+// second either refuses to run or comes up unable to query the wineserver. That
+// is why VRChat and VRCOSC appear mutually exclusive, and why VRCOSC crashed in
+// Velopack's updater (`GetCurrentProcessPath` -> `EnumProcessModules` ->
+// "Access denied") when it was started while VRChat was already running.
+pub fun get_prefix_holders(): [Text] {
+    const pfx = "{VRC_COMPATDATA}/pfx"
+    // Proton exports "WINEPREFIX=<path>/" with a trailing slash while
+    // protontricks exports it without, so both spellings must match.
+    //
+    // cat, not a redirect: reading /proc/PID/environ needs PTRACE_MODE_READ, so
+    // [ -r ] can say yes and the open still fail with EACCES -- and a failing
+    // shell redirect prints its own error that no 2>/dev/null on tr can silence.
+    const found = trust $
+        for proc in /proc/[0-9]*; do
+            [ -r "\$proc/environ" ] || continue
+            cat "\$proc/environ" 2>/dev/null | tr '\\0' '\\n' \
+                | grep -qxF -e "WINEPREFIX={pfx}" -e "WINEPREFIX={pfx}/" || continue
+            name="\$(cat "\$proc/comm" 2>/dev/null || true)"
+            printf '%s %s\n' "\$\{proc#/proc/}" "\$\{name:-unknown}"
+        done
+    $
+    return nonempty_lines(found)
+}
+
+// The process names out of "<pid> <name>" lines.
+pub fun holder_names(holders: [Text]): [Text] {
+    let names = [Text]
+    for holder in holders {
+        names += [trust $ printf '%s' "{holder}" | awk '\{print \$2}' $]
+    }
+    return names
+}
+
+// True when a VRCOSC process is holding the prefix. VRCOSC rewrites settings.json
+// from memory when it exits, so anything written underneath a running instance is
+// silently discarded -- the settings would look applied here and be gone by the
+// time the user looked.
+pub fun vrcosc_is_running(): Bool {
+    for name in holder_names(get_prefix_holders()) {
+        if matches(name, "^[Vv][Rr][Cc][Oo][Ss][Cc]") {
+            return true
+        }
+    }
+    return false
+}
+
+// The pid of a running VRChat.exe that owns this prefix inside Steam's
+// pressure-vessel container, or empty.
+//
+// Steam runs the game inside its own user+mount namespace. A wine process
+// started from the host cannot usefully join that wineserver: it does connect,
+// but the wineserver cannot read a process outside its user namespace, so the
+// first module query -- Velopack's GetCurrentProcessPath() -- fails with
+// "Access denied" and VRCOSC dies before it has a window. Entering the game's
+// namespaces first (nsenter -U -m, allowed unprivileged because we own them)
+// puts VRCOSC in the same wine session as VRChat: same process table, same named
+// pipes, same windows, which is what VRChatClient needs to ever report the game
+// as open.
+pub fun find_vrchat_container_pid(): Text {
+    const pfx = "{VRC_COMPATDATA}/pfx"
+    return trust $
+        for proc in /proc/[0-9]*; do
+            [ "\$(cat "\$proc/comm" 2>/dev/null)" = "VRChat.exe" ] || continue
+            [ -r "\$proc/environ" ] || continue
+            cat "\$proc/environ" 2>/dev/null | tr '\\0' '\\n' \
+                | grep -qxF -e "WINEPREFIX={pfx}" -e "WINEPREFIX={pfx}/" || continue
+            cat "\$proc/environ" 2>/dev/null | tr '\\0' '\\n' | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
+            printf '%s\n' "\$\{proc#/proc/}"
+            break
+        done
+    $
+}
+
+pub fun vrchat_is_running(): Bool {
+    return find_vrchat_container_pid() != ""
+}
+
+// Writes VRChat's own environment as a sourceable file, so a joining process
+// runs with exactly Proton's settings (WINEDLLOVERRIDES, esync/fsync, paths).
+// Per-process loader state is dropped; so is anything that is not a valid shell
+// identifier, since some launchers export odd keys.
+pub fun write_session_env_file(vrc_pid: Text, out: Text): Null {
+    trust $ tr '\\0' '\\n' < "/proc/{vrc_pid}/environ" \
+        | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
+        | grep -vE '^(WINELOADERNOEXEC|WINEPRELOADRESERVE|WINEDEBUG|_|PWD|OLDPWD|SHLVL)=' \
+        | while IFS= read -r line; do
+            printf 'export %s=%q\n' "\$\{line%%=*}" "\$\{line#*=}"
+        done > "{out}" $
+}
+
+// Notes when a wine session other than VRChat's is using this prefix.
+//
+// VRChat itself holding the prefix is normal and expected -- the launcher joins
+// that session on purpose. A different session (a VRCOSC already running under
+// protontricks, say) is worth mentioning before we write into the prefix.
+pub fun warn_if_prefix_busy(): Null {
+    const holders = get_prefix_holders()
+    if len(holders) == 0 {
+        return null
+    }
+
+    // VRChat holding the prefix is fine for the launcher, which joins that
+    // session on purpose -- but not for the installer. apply_wpf_registry_fix()
+    // and the .NET install run through protontricks, which starts a second
+    // wineserver on the same prefix. Each wineserver holds the registry in memory
+    // and writes user.reg/system.reg wholesale on shutdown, so ours saves the
+    // patch seconds later and VRChat's overwrites it hours later with a snapshot
+    // taken before the patch existed. The install looks like it worked and the
+    // black-window fix is simply gone.
+    if vrchat_is_running() {
+        log_warn("VRChat is running. Files installed into the prefix are unaffected, but")
+        log_warn("registry writes are not: see the note at the registry step below.")
+        return null
+    }
+
+    const others = trust $ printf '%s\n' {holder_names(holders)} | sort -u | tr '\n' ' ' $
+    log_warn("Wine processes are already running in this prefix: {others}")
+    echo("{YELLOW}Installing should still work. If VRCOSC later fails to start, close it{NC}")
+    echo("{YELLOW}and VRChat, wait for wineserver to exit, and run the installer again.{NC}")
+}
+
+// Smoke-tests one runtime mode by asking wine for its version. Leaves a short
+// human-readable result in LAST_RUNTIME_PROBE and returns true only when the
+// environment came back clean.
+#[allow_public_mutable]
+pub let LAST_RUNTIME_PROBE = ""
+pub fun test_runtime_mode(candidate: Text): Bool {
+    const ok = run_in_prefix_captured("wine --version", candidate, 180)
+    const out = LAST_PREFIX_OUTPUT
+
+    if ok and not prefix_output_is_broken(out) {
+        const version = first_match(out, "wine-[0-9][^[:space:]]*")
+        LAST_RUNTIME_PROBE = version != "" then version else "wine ok"
+        return true
+    }
+
+    const reason = trust $ grep -E 'Fontconfig error|error while loading|wine: ' <<< "{out}" | head -n 1 | sed 's/^[[:space:]]*//' $
+    let summary = "exit={LAST_PREFIX_STATUS}"
+    if reason != "" {
+        summary += " -- {reason}"
+    }
+    LAST_RUNTIME_PROBE = summary
+    return false
+}
+
+// The Proton build a prefix was last created or updated with. config_info holds
+// the version string on line 1 and <proton root>/files/share/fonts/ on line 2.
+pub fun get_prefix_proton_version(): Text {
+    const ci = "{VRC_COMPATDATA}/config_info"
+    if not file_exists(ci) {
+        return ""
+    }
+    return first_line(ci)
+}
+
+pub fun get_prefix_proton_dir(): Text {
+    const ci = "{VRC_COMPATDATA}/config_info"
+    if not file_exists(ci) {
+        return ""
+    }
+    let fonts_dir = trust $ sed -n '2p' "{ci}" $
+    if fonts_dir == "" {
+        return ""
+    }
+    fonts_dir = strip_suffix(fonts_dir, "/") // .../files/share/fonts
+    return dirname(dirname(dirname(fonts_dir)))
+}
+
+// The Steam Runtime app id a Proton build demands, if it declares one. A build
+// that requires a runtime protontricks cannot locate is the usual source of
+// "Current Steam Runtime not recognized by Protontricks".
+pub fun get_prefix_runtime_appid(): Text {
+    const proton_dir = get_prefix_proton_dir()
+    if proton_dir == "" {
+        return ""
+    }
+    const manifest = "{proton_dir}/toolmanifest.vdf"
+    if not file_exists(manifest) {
+        return ""
+    }
+    return trust $ grep -oE '"require_tool_appid"[[:space:]]*"[0-9]+"' "{manifest}" | grep -oE '[0-9]+' | head -n 1 $
+}
+
+// Picks the runtime mode to use for every subsequent wine call. An explicit
+// --runtime is honoured as-is; "auto" probes candidates and takes the first one
+// that yields a clean `wine --version`.
+pub fun probe_runtime_mode(): Null {
+    if RUNTIME_MODE != "auto" {
+        RESOLVED_RUNTIME_MODE = RUNTIME_MODE
+        log_info("Using requested Proton runtime mode: {BOLD}{RESOLVED_RUNTIME_MODE}{NC}")
+        return null
+    }
+
+    const contaminated = list_contaminated_env()
+    if len(contaminated) > 0 {
+        log_warn("Scrubbing leaked Steam Runtime variables from wine calls: {join_words(contaminated)} ")
+    }
+
+    if DRY_RUN {
+        RESOLVED_RUNTIME_MODE = "no-bwrap"
+        log_info("Dry run: skipping runtime probe, assuming mode '{RESOLVED_RUNTIME_MODE}'.")
+        return null
+    }
+
+    for candidate in RUNTIME_MODE_CANDIDATES {
+        log_info("Probing Proton runtime mode '{candidate}'...")
+        if test_runtime_mode(candidate) {
+            RESOLVED_RUNTIME_MODE = candidate
+            log_success("Runtime mode '{candidate}' is usable ({LAST_RUNTIME_PROBE}).")
+            return null
+        }
+        log_warn("Runtime mode '{candidate}' produced a broken wine environment: {LAST_RUNTIME_PROBE}")
+    }
+
+    log_error("No Steam Runtime mode produced a working wine environment.")
+    echo("{YELLOW}This usually means protontricks cannot pair your Proton build with a Steam Runtime.{NC}")
+    echo("Try launching VRChat once through Steam, then re-run this script.")
+    echo("You can also force a mode explicitly, e.g. {CYAN}--runtime host{NC}.")
+    exit(1)
+}

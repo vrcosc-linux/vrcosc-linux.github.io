@@ -1,0 +1,265 @@
+// --info: everything a bug report needs, best-effort. A probe that fails is
+// itself a finding, so nothing in here may abort the report.
+import { RED, GREEN, YELLOW, CYAN, BOLD, NC, SCRIPT_VERSION, DISCORD_INVITE, DISCORD_THREAD, RUNTIME_MODE_CANDIDATES } from "constants.ab"
+import { VRC_COMPATDATA } from "state.ab"
+import { log_info } from "log.ab"
+import { have_cmd, env_or, file_exists, dir_exists, is_symlink, glob, basename, dirname, join_words, matches } from "util.ab"
+import { get_launcher_script, get_desktop_file, get_app_icon_path, get_vrcosc_install_dir, get_vrchat_game_dir, get_vrcosc_version_from_dir, files_identical } from "paths.ab"
+import { list_contaminated_env, get_prefix_holders, holder_names, find_vrchat_container_pid, test_runtime_mode, LAST_RUNTIME_PROBE, get_prefix_proton_version, get_prefix_proton_dir, get_prefix_runtime_appid } from "runtime.ab"
+import { get_required_dotnet_channel, has_desktop_runtime_channel, get_installed_desktop_runtimes } from "dotnet.ab"
+import { github_api, looks_rate_limited } from "vrcosc.ab"
+import { resolve_launch_bridge } from "bridge.ab"
+import { find_prefix_silently } from "prefix.ab"
+
+fun or_default(value: Text, fallback: Text): Text {
+    return value != "" then value else fallback
+}
+
+fun installed_or_missing(path: Text, present: Text): Text {
+    if file_exists(path) {
+        return "{CYAN}{present} ({path}){NC}"
+    }
+    return "{YELLOW}Missing{NC}"
+}
+
+pub fun show_diagnostics(): Null {
+    log_info("Collecting diagnostic and environment information...")
+    echo("")
+
+    // System & OS Information
+    echo("{BOLD}=== System & OS Environment ==={NC}")
+    let os_pretty = "Unknown"
+    if file_exists("/etc/os-release") {
+        os_pretty = trust $ grep -E '^PRETTY_NAME=' /etc/os-release | cut -d'=' -f2- | tr -d '"' || true $
+    }
+    const kernel_ver = trust $ uname -r 2>/dev/null || echo 'Unknown' $
+    const arch = trust $ uname -m 2>/dev/null || echo 'Unknown' $
+    const de = env_or("XDG_CURRENT_DESKTOP", "Unknown")
+    const session_type = env_or("XDG_SESSION_TYPE", "Unknown")
+    const desktop_session = env_or("DESKTOP_SESSION", "Unknown")
+
+    echo("  * Installer:             {CYAN}v{SCRIPT_VERSION}{NC}")
+    echo("  * OS:                    {CYAN}{os_pretty}{NC}")
+    echo("  * Kernel:                {CYAN}{kernel_ver} ({arch}){NC}")
+    echo("  * Desktop Environment:   {CYAN}{de} ({session_type}){NC}")
+    echo("  * Session:               {CYAN}{desktop_session}{NC}")
+
+    // Tooling
+    echo("")
+    echo("{BOLD}=== Tooling & Runtime Dependencies ==={NC}")
+    let pt_ver = "Not installed"
+    if have_cmd("protontricks") {
+        pt_ver = trust $ protontricks --version 2>&1 | grep -vi 'warning\|deprecat' | head -n 1 || true $
+    }
+    let curl_ver = "Not installed"
+    if have_cmd("curl") {
+        curl_ver = trust $ curl --version 2>&1 | head -n 1 | awk '\{print \$1, \$2}' || true $
+    }
+    let unzip_ver = "Not installed"
+    if have_cmd("unzip") {
+        unzip_ver = "Installed ({trust $ command -v unzip || true $})"
+    }
+    let archiver = "tar/xz"
+    if have_cmd("7z") {
+        const z7_ver = trust $ 7z 2>&1 | grep -i '7-Zip' | head -n 1 | awk '\{print \$2}' || true $
+        archiver = "7z ({or_default(z7_ver, "installed")})"
+    }
+
+    echo("  * Protontricks:          {CYAN}{pt_ver}{NC}")
+    echo("  * cURL:                  {CYAN}{curl_ver}{NC}")
+    echo("  * Unzip:                 {CYAN}{unzip_ver}{NC}")
+    echo("  * Compression Tool:      {CYAN}{archiver}{NC}")
+
+    // Prefix & Wine Configuration
+    echo("")
+    echo("{BOLD}=== VRChat Proton Prefix ==={NC}")
+    find_prefix_silently()
+
+    if VRC_COMPATDATA != "" and dir_exists("{VRC_COMPATDATA}/pfx") {
+        echo("  * Prefix Root:           {CYAN}{VRC_COMPATDATA}{NC}")
+        echo("  * Prefix pfx:            {CYAN}{VRC_COMPATDATA}/pfx{NC}")
+
+        const proton_ver = or_default(get_prefix_proton_version(), "Unknown (prefix never launched?)")
+        const proton_dir = or_default(get_prefix_proton_dir(), "Unknown")
+        const runtime_appid = get_prefix_runtime_appid()
+        echo("  * Proton Build:          {CYAN}{proton_ver}{NC}")
+        echo("  * Proton Path:           {CYAN}{proton_dir}{NC}")
+        if runtime_appid != "" {
+            echo("  * Required Steam Runtime: {CYAN}appid {runtime_appid}{NC}")
+        } else {
+            echo("  * Required Steam Runtime: {YELLOW}None declared (custom Proton; protontricks may not find a runtime){NC}")
+        }
+
+        const user_reg = "{VRC_COMPATDATA}/pfx/user.reg"
+        const sys_reg = "{VRC_COMPATDATA}/pfx/system.reg"
+        const user_reg_status = file_exists(user_reg) then "Present" else "Missing"
+        const sys_reg_status = file_exists(sys_reg) then "Present" else "Missing"
+
+        echo("  * Registry (user.reg):   {CYAN}{user_reg}{NC} ({user_reg_status})")
+        echo("  * Registry (system.reg): {CYAN}{sys_reg}{NC} ({sys_reg_status})")
+
+        let wpf_disabled = false
+        for reg in [user_reg, sys_reg] {
+            if file_exists(reg) {
+                trust silent $ grep -q 'DisableHWAcceleration' "{reg}" $
+                if status() == 0 {
+                    wpf_disabled = true
+                }
+            }
+        }
+        if wpf_disabled {
+            echo("  * WPF HW Accel Patch:    {GREEN}Applied (DisableHWAcceleration=1){NC}")
+        } else {
+            echo("  * WPF HW Accel Patch:    {YELLOW}Not detected (Black window issue may occur){NC}")
+        }
+
+        const dotnet_exe = "{VRC_COMPATDATA}/pfx/drive_c/Program Files/dotnet/dotnet.exe"
+        let dotnet_status = "Not installed"
+        if file_exists(dotnet_exe) {
+            dotnet_status = "Installed ({dotnet_exe})"
+        }
+        echo("  * .NET Binary:           {CYAN}{dotnet_status}{NC}")
+
+        const desktop_runtimes = get_installed_desktop_runtimes()
+        if len(desktop_runtimes) > 0 {
+            echo("  * .NET WindowsDesktop:   {CYAN}{join_words(desktop_runtimes)}{NC}")
+        } else {
+            echo("  * .NET WindowsDesktop:   {YELLOW}None detected{NC}")
+        }
+
+        const required_channel = get_required_dotnet_channel(get_vrcosc_install_dir())
+        if {
+            required_channel == "" {
+                echo("  * .NET Required by App:  {YELLOW}Unknown (VRCOSC.runtimeconfig.json not readable){NC}")
+            }
+            has_desktop_runtime_channel(required_channel) {
+                echo("  * .NET Required by App:  {GREEN}{required_channel}.x (satisfied){NC}")
+            }
+            else {
+                echo("  * .NET Required by App:  {RED}{required_channel}.x (MISSING -- VRCOSC will not start){NC}")
+                echo("    {YELLOW}.NET does not roll forward across major versions; run install.sh again to fix.{NC}")
+            }
+        }
+
+        echo("")
+        echo("{BOLD}=== Wine Environment Health ==={NC}")
+        const contaminated = list_contaminated_env()
+        if len(contaminated) > 0 {
+            echo("  * Leaked Runtime Vars:   {YELLOW}{join_words(contaminated)} {NC}")
+            echo("    {YELLOW}These are scrubbed from wine calls; unscrubbed they cause bogus errors{NC}")
+            echo("    {YELLOW}such as 'Fontconfig error: /etc/fonts/fonts.conf: out of memory'.{NC}")
+        } else {
+            echo("  * Leaked Runtime Vars:   {GREEN}None{NC}")
+        }
+
+        const vrc_pid = find_vrchat_container_pid()
+        if {
+            vrc_pid != "" and have_cmd("nsenter") {
+                echo("  * VRChat Session:        {GREEN}Running in Steam's container (pid {vrc_pid}); launcher will join it{NC}")
+            }
+            vrc_pid != "" {
+                echo("  * VRChat Session:        {YELLOW}Running (pid {vrc_pid}) but nsenter is missing; cannot join it{NC}")
+            }
+            else {
+                echo("  * VRChat Session:        {CYAN}Not running (VRCOSC will start a session of its own){NC}")
+            }
+        }
+
+        const holders = get_prefix_holders()
+        if len(holders) > 0 {
+            const names = trust $ printf '%s\n' {holder_names(holders)} | sort -u | head -n 4 | tr '\n' ' ' $
+            echo("  * Wine Processes In Prefix: {CYAN}{len(holders)}{NC} ({names}...)")
+        } else {
+            echo("  * Wine Processes In Prefix: {GREEN}None (prefix idle){NC}")
+        }
+
+        for candidate in RUNTIME_MODE_CANDIDATES {
+            const ok = test_runtime_mode(candidate)
+            trust $ printf '  * Runtime [%-9s]:  ' "{candidate}" $
+            if ok {
+                echo("{GREEN}OK ({LAST_RUNTIME_PROBE}){NC}")
+            } else {
+                echo("{RED}Broken{NC} {YELLOW}{LAST_RUNTIME_PROBE}{NC}")
+            }
+        }
+
+        echo("")
+        echo("{BOLD}=== VRCOSC User Config Directories ==={NC}")
+        let cfgs_found = false
+        for u in glob("{VRC_COMPATDATA}/pfx/drive_c/users/*") {
+            const uname = basename(u)
+            // VRCOSC-Beta is not created by any release build; it is listed because a
+            // hand-made setup may still have one.
+            for ch in ["VRCOSC:Live and Beta", "VRCOSC-Beta:Beta (custom)"] {
+                const folder = trust $ printf '%s' "\$\{{nameof(ch)}%%:*}" $
+                const label = trust $ printf '%s' "\$\{{nameof(ch)}##*:}" $
+                const cfg_dir = "{u}/AppData/Roaming/{folder}"
+                if dir_exists(cfg_dir) {
+                    let real_tgt = ""
+                    if is_symlink(cfg_dir) {
+                        real_tgt = " -> {trust $ readlink "{cfg_dir}" $}"
+                    }
+                    echo("  * User [{uname}] ({label}):     {CYAN}{cfg_dir}{NC}{real_tgt}")
+                    cfgs_found = true
+                }
+            }
+        }
+        if not cfgs_found {
+            echo("  * {YELLOW}No active VRCOSC AppData config directories found.{NC}")
+        }
+
+        echo("")
+        echo("{BOLD}=== VRCOSC Installation & Versions ==={NC}")
+        echo("  * Local Version (Live):   {CYAN}{get_vrcosc_version_from_dir(get_vrcosc_install_dir("live"))}{NC}")
+        echo("  * Local Version (Beta):   {CYAN}{get_vrcosc_version_from_dir(get_vrcosc_install_dir("beta"))}{NC}")
+    } else {
+        echo("  * Prefix Root:           {YELLOW}Not detected (use --prefix <PATH> if located on an external drive){NC}")
+    }
+
+    // Remote GitHub Releases
+    let remote_live = "Unavailable (Network/Rate-limited)"
+    let remote_beta = "Unavailable (Network/Rate-limited)"
+    const releases_json = github_api("https://api.github.com/repos/VolcanicArts/VRCOSC/releases")
+    if releases_json != "" {
+        if have_cmd("python3") {
+            remote_live = trust $ python3 -c "import json,sys; data=json.loads(sys.stdin.read()); print(next((r['tag_name'] for r in data if not r.get('prerelease')), 'Unavailable'))" <<< "{releases_json}" 2>/dev/null || echo 'Unavailable' $
+            remote_beta = trust $ python3 -c "import json,sys; data=json.loads(sys.stdin.read()); print(next((r['tag_name'] for r in data if r.get('prerelease')), 'Unavailable'))" <<< "{releases_json}" 2>/dev/null || echo 'Unavailable' $
+        } else {
+            remote_live = trust $ echo "{releases_json}" | grep -B 10 -A 2 '"prerelease": false' | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || echo 'Unavailable' $
+            remote_beta = trust $ echo "{releases_json}" | grep -B 10 -A 2 '"prerelease": true' | grep '"tag_name":' | head -n 1 | cut -d'"' -f4 || echo 'Unavailable' $
+        }
+    }
+    if looks_rate_limited(releases_json) {
+        remote_live = "Rate-limited (export GITHUB_TOKEN to check)"
+        remote_beta = remote_live
+    }
+    echo("  * Remote Latest (Live):   {CYAN}{remote_live}{NC}")
+    echo("  * Remote Latest (Beta):   {CYAN}{remote_beta}{NC}")
+
+    echo("")
+    echo("{BOLD}=== Integration & Launchers ==={NC}")
+    echo("  * Command (vrcosc):        {installed_or_missing(get_launcher_script("live"), "Installed")}")
+    echo("  * Command (vrcosc-beta):   {installed_or_missing(get_launcher_script("beta"), "Installed")}")
+    echo("  * Desktop (Live):          {installed_or_missing(get_desktop_file("live"), "Present")}")
+    echo("  * Desktop (Beta):          {installed_or_missing(get_desktop_file("beta"), "Present")}")
+    echo("  * Icon:                    {installed_or_missing(get_app_icon_path(), "Present")}")
+
+    const target_launch = "{get_vrchat_game_dir()}/launch.exe"
+    const source_bridge = resolve_launch_bridge(false)
+    let bridge_status = "{YELLOW}Unpatched / Missing{NC}"
+    if {
+        source_bridge != "" and files_identical(source_bridge, target_launch) {
+            bridge_status = "{GREEN}Patched (Linux IPC Named-Pipe Bridge){NC}"
+        }
+        file_exists(target_launch) {
+            bridge_status = "{YELLOW}Stock launch.exe (Unpatched){NC}"
+        }
+    }
+    echo("  * VRChat Launch Bridge:    {bridge_status}")
+
+    echo("")
+    echo("{BOLD}=== Community & Support ==={NC}")
+    echo("  * Server Invite:           {CYAN}{DISCORD_INVITE}{NC}")
+    echo("  * Linux Discussion:        {CYAN}{DISCORD_THREAD}{NC}")
+    echo("")
+}

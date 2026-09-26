@@ -1,0 +1,147 @@
+// Small shell helpers the rest of the installer is written in terms of.
+
+// The current user's home directory.
+pub fun home(): Text {
+    return trust $ printf '%s' "\$HOME" $
+}
+
+// An environment variable's value, or the fallback when it is unset or empty.
+pub fun env_or(name: Text, fallback: Text): Text {
+    return trust $ printf '%s' "\$\{!{nameof(name)}:-{fallback}}" $
+}
+
+// True when the variable is set to a non-empty value.
+pub fun env_is_set(name: Text): Bool {
+    return env_or(name, "") != ""
+}
+
+// True when a command is on PATH.
+pub fun have_cmd(name: Text): Bool {
+    trust silent $ command -v "{name}" $
+    return status() == 0
+}
+
+// Every path matching a shell glob, one per element; empty when nothing matches.
+pub fun glob(pattern: Text): [Text] {
+    let matches = [Text]
+    trust $ mapfile -t {nameof(matches)} < <(compgen -G "{pattern}" 2>/dev/null) $
+    return matches
+}
+
+// The lines of a text, keeping empty ones. std/text's split_lines collapses
+// consecutive newlines, which loses information when the text is a file listing.
+pub fun lines_of(text: Text): [Text] {
+    let out = [Text]
+    if text == "" {
+        return out
+    }
+    trust $ mapfile -t {nameof(out)} <<< "{text}" $
+    return out
+}
+
+// The non-empty lines of a text.
+pub fun nonempty_lines(text: Text): [Text] {
+    let out = [Text]
+    for line in lines_of(text) {
+        if line != "" {
+            out += [line]
+        }
+    }
+    return out
+}
+
+pub fun path_exists(path: Text): Bool {
+    trust $ [ -e "{path}" ] $
+    return status() == 0
+}
+
+pub fun file_exists(path: Text): Bool {
+    trust $ [ -f "{path}" ] $
+    return status() == 0
+}
+
+pub fun dir_exists(path: Text): Bool {
+    trust $ [ -d "{path}" ] $
+    return status() == 0
+}
+
+pub fun is_symlink(path: Text): Bool {
+    trust $ [ -L "{path}" ] $
+    return status() == 0
+}
+
+pub fun is_readable(path: Text): Bool {
+    trust $ [ -r "{path}" ] $
+    return status() == 0
+}
+
+pub fun dirname(path: Text): Text {
+    return trust $ dirname "{path}" $
+}
+
+pub fun basename(path: Text): Text {
+    return trust $ basename "{path}" $
+}
+
+// A file's contents; empty when it cannot be read.
+pub fun read_file(path: Text): Text {
+    return trust $ cat "{path}" 2>/dev/null $
+}
+
+// The first line of a file, or empty.
+pub fun first_line(path: Text): Text {
+    return trust $ head -n 1 "{path}" 2>/dev/null $
+}
+
+// The first n bytes of a file.
+pub fun head_bytes(path: Text, count: Int): Text {
+    return trust $ head -c {count} "{path}" 2>/dev/null $
+}
+
+pub fun mkdir_p(path: Text): Bool {
+    trust silent $ mkdir -p "{path}" $
+    return status() == 0
+}
+
+// True when stdin is a terminal, i.e. someone is there to answer a prompt.
+pub fun stdin_is_tty(): Bool {
+    trust $ [ -t 0 ] $
+    return status() == 0
+}
+
+// Writes a line to stderr.
+pub fun echo_err(message: Text): Null {
+    trust $ printf '%s\n' "{message}" >&2 $
+}
+
+// True when the text contains the search string, as a plain substring.
+pub fun contains(haystack: Text, needle: Text): Bool {
+    trust $ [[ "{haystack}" == *"{needle}"* ]] $
+    return status() == 0
+}
+
+// True when the text matches an extended regular expression.
+pub fun matches(text: Text, regex: Text): Bool {
+    trust $ grep -qE "{regex}" <<< "{text}" $
+    return status() == 0
+}
+
+// The first match of an extended regular expression in the text, or empty.
+pub fun first_match(text: Text, regex: Text): Text {
+    return trust $ grep -oE "{regex}" <<< "{text}" | head -n 1 $
+}
+
+// Text with the given trailing suffix removed once, if present.
+pub fun strip_suffix(text: Text, suffix: Text): Text {
+    return trust $ printf '%s' "\$\{{nameof(text)}%"\$\{{nameof(suffix)}}"}" $
+}
+
+// Text with the given leading prefix removed once, if present.
+pub fun strip_prefix(text: Text, prefix: Text): Text {
+    return trust $ printf '%s' "\$\{{nameof(text)}#"\$\{{nameof(prefix)}}"}" $
+}
+
+// Joins the elements with a single space.
+pub fun join_words(items: [Text]): Text {
+    return trust $ printf '%s' "\$\{{nameof(items)}[*]}" $
+}

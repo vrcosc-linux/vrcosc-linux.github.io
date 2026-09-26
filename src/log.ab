@@ -1,0 +1,32 @@
+// Coloured output, and the banner shown when the installer stops on an error.
+import { RED, GREEN, BLUE, YELLOW, CYAN, NC, DISCORD_INVITE, DISCORD_THREAD } from "constants.ab"
+
+pub fun log_info(message: Text): Null {
+    echo("{BLUE}{message}{NC}")
+}
+
+pub fun log_success(message: Text): Null {
+    echo("{GREEN}{message}{NC}")
+}
+
+pub fun log_warn(message: Text): Null {
+    echo("{YELLOW}{message}{NC}")
+}
+
+pub fun log_error(message: Text): Null {
+    echo("{RED}{message}{NC}")
+}
+
+// Printed when a step fails in a way the installer did not plan for. The exit
+// code is what a bug report needs first, along with --version.
+pub fun on_error(exit_code: Int): Null {
+    echo("")
+    log_error("============================================================")
+    log_error(" Installation encountered an error (exit code {exit_code})!")
+    log_error("============================================================")
+    echo("{YELLOW}Need help or ran into an unexpected bug? Join the VRCOSC Discord:{NC}")
+    echo("  * Server Invite:  {CYAN}{DISCORD_INVITE}{NC}")
+    echo("  * Linux Thread:   {CYAN}{DISCORD_THREAD}{NC}")
+    echo("")
+    exit(exit_code)
+}

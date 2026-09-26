@@ -1,0 +1,272 @@
+// The VRChat launch.exe bridge: finding the payload, patching it in and taking
+// it back out again.
+import { LAUNCH_BRIDGE_URLS } from "constants.ab"
+import { DRY_RUN, PATCH_LAUNCH, LAUNCH_BRIDGE_SHA256 } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { have_cmd, file_exists, dir_exists, dirname, head_bytes, mkdir_p } from "util.ab"
+import { get_script_dir, get_launch_bridge_cache, get_vrchat_game_dir, files_identical } from "paths.ab"
+
+// True when a payload is the exact bridge this script was published with. Without
+// sha256sum there is nothing to compare against, so the check passes rather than
+// refusing to install on a host that simply lacks coreutils' hashing tool.
+pub fun launch_bridge_is_current(path: Text): Bool {
+    if not file_exists(path) {
+        return false
+    }
+    if not have_cmd("sha256sum") {
+        return true
+    }
+    return trust $ sha256sum < "{path}" | awk '\{print \$1}' $ == LAUNCH_BRIDGE_SHA256
+}
+
+// True when a file is one of our launch bridges, of any build. The payload embeds
+// this marker; VRChat's own launcher does not. Used where comparing against the
+// current payload is not enough, because an older bridge differs from it byte for
+// byte while behaving exactly the same way.
+pub fun is_launch_bridge(path: Text): Bool {
+    if not file_exists(path) {
+        return false
+    }
+    trust silent $ grep -aqF 'launch_bridge_ready' "{path}" $
+    return status() == 0
+}
+
+// Absolute path to a usable vrc-launch-bridge.exe, or empty if there is none.
+// Prefers the copy beside the script, then a previously cached download, then
+// fetches it -- so a piped install still gets the bridge instead of skipping it.
+// Pass allow_download = false to stay offline (used by --info, which must not mutate).
+pub fun resolve_launch_bridge(allow_download: Bool = true): Text {
+    const script_dir = get_script_dir()
+    if script_dir != "" and file_exists("{script_dir}/bin/vrc-launch-bridge.exe") {
+        return "{script_dir}/bin/vrc-launch-bridge.exe"
+    }
+
+    const cache = get_launch_bridge_cache()
+    // A cache that matches the pinned digest is current. One that does not is from
+    // an older install, and is re-fetched rather than kept forever.
+    if file_exists(cache) and launch_bridge_is_current(cache) {
+        return cache
+    }
+
+    if not allow_download {
+        // Nothing to verify against and nothing to download: a stale cache is still
+        // better than no bridge at all for read-only callers.
+        if file_exists(cache) {
+            return cache
+        }
+        return ""
+    }
+    if DRY_RUN {
+        return ""
+    }
+
+    const tmp = trust $ mktemp $
+    if status() != 0 {
+        return ""
+    }
+    let got = false
+    for url in LAUNCH_BRIDGE_URLS {
+        trust silent $ curl -fsSL --connect-timeout 10 -o "{tmp}" "{url}" $
+        if status() != 0 {
+            continue
+        }
+        // A rate-limit page or an HTML error body is not a PE binary; refuse it
+        // rather than installing garbage over VRChat's launcher.
+        if head_bytes(tmp, 2) != "MZ" {
+            continue
+        }
+        // Pages can serve a build behind main, so a payload that is not the one
+        // this script was published with means try the next source.
+        if not launch_bridge_is_current(tmp) {
+            continue
+        }
+        got = true
+        break
+    }
+
+    // Every source disagreed with the pinned digest. A stale cache still works;
+    // preferring it over nothing keeps vrchat:// navigation alive.
+    if not got {
+        trust $ rm -f "{tmp}" $
+        if file_exists(cache) {
+            return cache
+        }
+        return ""
+    }
+    if not mkdir_p(dirname(cache)) {
+        trust $ rm -f "{tmp}" $
+        return ""
+    }
+    trust silent $ mv "{tmp}" "{cache}" $
+    if status() != 0 {
+        trust $ rm -f "{tmp}" $
+        return ""
+    }
+    trust $ chmod 644 "{cache}" $
+    return cache
+}
+
+// Copy the resolved bridge into its cache location, so the generated launcher
+// has one stable path to re-patch from even if the checkout is deleted later.
+// Returns the cached path, or empty if there is no payload to stage.
+pub fun stage_launch_bridge(): Text {
+    const src = resolve_launch_bridge()
+    if src == "" {
+        return ""
+    }
+    const cache = get_launch_bridge_cache()
+    if src != cache {
+        if not mkdir_p(dirname(cache)) {
+            return ""
+        }
+        trust silent $ cp -f "{src}" "{cache}" $
+        if status() != 0 {
+            return ""
+        }
+        trust silent $ chmod 644 "{cache}" $
+    }
+    return cache
+}
+
+pub fun patch_vrchat_launch_bridge(): Null {
+    // Refusable: this writes into VRChat's own install directory. The game works
+    // without it; only vrchat:// navigation from VRCOSC and companion tools needs
+    // the bridge.
+    if not PATCH_LAUNCH {
+        log_info("Leaving VRChat's launch.exe alone (--no-patch).")
+        return null
+    }
+    log_info("Checking VRChat launch.exe for Linux IPC named-pipe bridge patch...")
+    if DRY_RUN {
+        return null
+    }
+
+    const vrc_game_dir = get_vrchat_game_dir()
+    const target_launch = "{vrc_game_dir}/launch.exe"
+    const backup_launch = "{vrc_game_dir}/launch.org.exe"
+
+    if not dir_exists(vrc_game_dir) {
+        log_warn("VRChat game directory not found ({vrc_game_dir}). Skipping launch.exe patch.")
+        return null
+    }
+
+    const source_bridge = stage_launch_bridge()
+    if source_bridge == "" {
+        log_warn("Could not obtain vrc-launch-bridge.exe (no local copy and the download failed). Skipping patch.")
+        return null
+    }
+
+    // Already patched? Check before touching the backup. Backing up a launch.exe
+    // that is already the bridge would make the bridge its own fallback, and
+    // RunOriginal() starting launch.org.exe would then re-enter the bridge with no
+    // bound -- every time the pipe is unavailable, i.e. whenever VRChat is closed.
+    if files_identical(source_bridge, target_launch) {
+        log_success("VRChat launch.exe is already patched with the Linux IPC bridge.")
+        trust silent $ chmod 555 "{target_launch}" $
+        return null
+    }
+
+    // Backup original launch.exe if launch.org.exe does not exist
+    if {
+        not file_exists(backup_launch) {
+            if file_exists(target_launch) {
+                // files_identical above only compared against the bridge we are about to
+                // install. An older bridge build differs from it byte for byte and would
+                // still recurse, so check for the payload's own marker as well.
+                if is_launch_bridge(target_launch) {
+                    log_warn("launch.exe is already a launch bridge but launch.org.exe is missing,")
+                    log_warn("so there is no stock launcher to fall back on. Use Steam's")
+                    log_warn("'Verify integrity of game files' on VRChat, then run this again.")
+                    return null
+                }
+                log_info("Creating read-only backup of original launch.exe -> launch.org.exe...")
+                trust $ cp -p "{target_launch}" "{backup_launch}" $
+                trust $ chmod 444 "{backup_launch}" $
+            }
+        }
+        file_exists(target_launch) and not is_launch_bridge(target_launch) and not files_identical(target_launch, backup_launch) {
+            // Steam has restored a launch.exe that is neither our bridge nor the one we
+            // backed up, i.e. VRChat updated. Refreshing the backup keeps the bridge's
+            // fallback on the current stock launcher instead of an older one.
+            log_info("VRChat's launch.exe changed; refreshing launch.org.exe from it.")
+            trust silent $ chmod 644 "{backup_launch}" $
+            trust $ cp -p "{target_launch}" "{backup_launch}" $
+            trust $ chmod 444 "{backup_launch}" $
+        }
+    }
+
+    log_info("Installing Linux IPC launch.exe wrapper into VRChat directory...")
+    // Stage beside the target and rename over it, so a failed copy cannot leave
+    // VRChat with no launch.exe at all. Same filesystem, so the mv is atomic.
+    const staged = "{vrc_game_dir}/.launch.exe.new.{trust $ printf '%s' "\$\$" $}"
+    trust silent $ cp "{source_bridge}" "{staged}" $
+    if status() != 0 {
+        trust silent $ rm -f "{staged}" $
+        log_warn("Could not write into {vrc_game_dir}; leaving launch.exe untouched.")
+        return null
+    }
+    trust silent $ chmod 555 "{staged}" $
+    // The installed bridge is 555, so make it writable before the rename replaces it.
+    trust silent $ chmod 755 "{target_launch}" $
+    trust silent $ mv -f "{staged}" "{target_launch}" $
+    if status() != 0 {
+        trust silent $ rm -f "{staged}" $
+        log_warn("Could not replace {target_launch}; it has been left as it was.")
+        return null
+    }
+    trust $ chmod 555 "{target_launch}" $
+    log_success("VRChat launch.exe patched successfully (read-only 555).")
+}
+
+// Put VRChat's own launch.exe back. Only the bridge is ours to remove: if Steam
+// has already restored a stock launcher, or shipped a newer one, that file stays
+// and only our now-redundant backup goes. Returns true when it did something
+// (or would have, under --dry-run).
+pub fun restore_vrchat_launch_bridge(): Bool {
+    const game_dir = get_vrchat_game_dir()
+    const target = "{game_dir}/launch.exe"
+    const backup = "{game_dir}/launch.org.exe"
+
+    if not file_exists(backup) {
+        return false
+    }
+    if DRY_RUN {
+        log_info("Would restore {target} from launch.org.exe.")
+        return true
+    }
+
+    const payload = resolve_launch_bridge(false)
+    if file_exists(target) and payload != "" and not files_identical(target, payload) {
+        log_info("launch.exe is not our bridge; leaving it and removing the stale backup.")
+        trust $ rm -f "{backup}" $
+        return true
+    }
+
+    if files_identical(target, backup) {
+        log_info("launch.exe is already VRChat's own; removing the redundant backup.")
+        trust $ rm -f "{backup}" $
+        return true
+    }
+
+    // A backup taken from an already-bridged launch.exe is not a stock launcher.
+    // Restoring it would leave the bridge in place under a name that says otherwise.
+    if is_launch_bridge(backup) {
+        log_warn("launch.org.exe is itself a launch bridge, not VRChat's own launcher,")
+        log_warn("so there is nothing to restore. Removing it; use Steam's 'Verify")
+        log_warn("integrity of game files' on VRChat to get the stock launcher back.")
+        trust $ rm -f "{backup}" $
+        return true
+    }
+
+    trust silent $ chmod 755 "{target}" $
+    trust silent $ rm -f "{target}" $
+    trust silent $ cp "{backup}" "{target}" $
+    if status() != 0 {
+        log_warn("Could not restore {target} from launch.org.exe; the backup has been left in place.")
+        return false
+    }
+    trust silent $ chmod 755 "{target}" $
+    trust $ rm -f "{backup}" $
+    log_success("Restored VRChat's original launch.exe.")
+    return true
+}

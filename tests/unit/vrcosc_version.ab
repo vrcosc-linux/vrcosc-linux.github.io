@@ -1,0 +1,143 @@
+// install_vrcosc() deletes the install directory before unpacking, so installing
+// without comparing versions is a downgrade. Observed on the maintainer's machine:
+// --info reported a local 2026.812.0.0 against a latest live release of 2026.807.0.
+//
+// Note the two version shapes: VRCOSC.deps.json records four components
+// ("2026.812.0.0") while the release tag has three ("2026.807.0"), so the same
+// release must not look like an upgrade or a downgrade to itself.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, VRCOSC_BRANCH, DRY_RUN, FORCE_INSTALL } from "../../src/state.ab"
+import { normalise_version, compare_versions, get_version_from_asset_url, install_vrcosc } from "../../src/vrcosc.ab"
+import { get_vrcosc_install_dir } from "../../src/paths.ab"
+
+const WORK = work_dir()
+const BIN = "{WORK}/bin"
+
+test "normalises away trailing zero components" {
+    expect_eq("2026.812.0.0 -> 2026.812", "2026.812", normalise_version("2026.812.0.0"))?
+    expect_eq("leaves a meaningful trailing component alone", "2026.418.1", normalise_version("2026.418.1"))?
+}
+
+test "compares versions across both shapes" {
+    expect_eq("sees a four-part local build as newer than an older three-part tag", "newer", compare_versions("2026.812.0.0", "2026.807.0"))?
+    expect_eq("sees an older local build as older", "older", compare_versions("2026.807.0", "2026.812.0"))?
+    expect_eq("sees the same release written both ways as the same", "same", compare_versions("2026.812.0.0", "2026.812.0"))?
+    expect_eq("compares the last component numerically, not lexically", "newer", compare_versions("2026.418.10", "2026.418.9"))?
+}
+
+test "reads the version a release asset delivers out of its URL" {
+    expect_eq("tag from URL", "2026.807.0", get_version_from_asset_url("https://github.com/VolcanicArts/VRCOSC/releases/download/2026.807.0/VRCOSC-2026.807.0-live-full.nupkg"))?
+}
+
+// install_vrcosc() is exercised with the releases API answered by the fake curl
+// and DRY_RUN on, which returns just after the "Downloading" line -- so that line
+// is the signal that it decided to install, and its absence that it declined.
+const RELEASE_TAG = "2026.807.0"
+fun serve_release(tag: Text): Null {
+    install_fake(BIN, "fake-curl", "curl")
+    prepend_path(BIN)
+    set_env("FAKE_CURL_BODY", "\{ \"tag_name\": \"{tag}\", \"assets\": [ \{ \"browser_download_url\": \"https://github.com/VolcanicArts/VRCOSC/releases/download/{tag}/VRCOSC-{tag}-live-full.nupkg\" } ] }")
+    set_bool(DRY_RUN, true)
+    set_text(VRCOSC_BRANCH, "live")
+    set_bool(FORCE_INSTALL, false)
+}
+
+fun with_local_version(name: Text, flags: [Text]): Null {
+    set_text(VRC_COMPATDATA, make_prefix("{WORK}/{name}", flags))
+}
+
+fun attempt_install(): Text {
+    capture_start()
+    install_vrcosc() failed {}
+    return capture_stop()
+}
+
+test "declines to overwrite a newer local build" {
+    serve_release(RELEASE_TAG)
+    with_local_version("newer", ["--vrcosc-version", "2026.812.0.0"])
+    const out = attempt_install()
+    expect_not_contains("no download", out, "Downloading VRCOSC package")?
+    expect_contains("and says why, naming both versions", out, "2026.812.0.0 is newer than the latest live release (2026.807.0)")?
+    expect_contains("and points at --force", out, "--force")?
+}
+
+test "skips an install that would change nothing" {
+    serve_release(RELEASE_TAG)
+    with_local_version("same", ["--vrcosc-version", "2026.807.0"])
+    const out = attempt_install()
+    expect_not_contains("no download", out, "Downloading VRCOSC package")?
+    expect_contains("and says it is already current", out, "already the latest live release")?
+}
+
+test "treats the same release written with four components as current" {
+    serve_release(RELEASE_TAG)
+    with_local_version("samewide", ["--vrcosc-version", "2026.807.0.0"])
+    expect_not_contains("no download", attempt_install(), "Downloading VRCOSC package")?
+}
+
+test "installs when the release is newer than the local build" {
+    serve_release(RELEASE_TAG)
+    with_local_version("older", ["--vrcosc-version", "2026.708.0"])
+    expect_contains("downloads", attempt_install(), "Downloading VRCOSC package")?
+}
+
+test "installs when nothing is there yet" {
+    serve_release(RELEASE_TAG)
+    with_local_version("fresh", ["--no-vrcosc"])
+    expect_contains("downloads", attempt_install(), "Downloading VRCOSC package")?
+}
+
+test "reinstalls when the local version cannot be read" {
+    serve_release(RELEASE_TAG)
+    with_local_version("unreadable", ["--vrcosc-version", "2026.812.0.0"])
+    trust $ rm -f "{get_vrcosc_install_dir()}/VRCOSC.deps.json" $
+    const out = attempt_install()
+    expect_contains("downloads", out, "Downloading VRCOSC package")?
+    expect_contains("and says the version was unreadable", out, "no readable version")?
+}
+
+test "--force overrides the downgrade guard" {
+    serve_release(RELEASE_TAG)
+    with_local_version("forced", ["--vrcosc-version", "2026.812.0.0"])
+    set_bool(FORCE_INSTALL, true)
+    expect_contains("downloads", attempt_install(), "Downloading VRCOSC package")?
+}
+
+// --- release channel selection -------------------------------------------------
+// Beta builds are published as prereleases, and /releases/latest never returns
+// one, so asking it for the beta channel handed back the live package instead.
+fun serve_channels(): Null {
+    install_fake(BIN, "fake-curl", "curl")
+    prepend_path(BIN)
+    set_env("FAKE_CURL_BODY", "[
+  \{\"tag_name\":\"2026.906.0\",\"prerelease\":true,\"assets\":[
+     \{\"browser_download_url\":\"https://github.com/VolcanicArts/VRCOSC/releases/download/2026.906.0/VRCOSC-2026.906.0-beta-full.nupkg\"}]},
+  \{\"tag_name\":\"2026.807.0\",\"prerelease\":false,\"assets\":[
+     \{\"browser_download_url\":\"https://github.com/VolcanicArts/VRCOSC/releases/download/2026.807.0/VRCOSC-2026.807.0-live-full.nupkg\"}]}
+]")
+    set_bool(DRY_RUN, true)
+    set_bool(FORCE_INSTALL, false)
+    // A prefix with nothing installed, so the downgrade guard stays out of the way.
+    set_text(VRC_COMPATDATA, make_prefix("{WORK}/channels", ["--no-vrcosc"]))
+}
+
+test "the live channel picks the live package" {
+    serve_channels()
+    set_text(VRCOSC_BRANCH, "live")
+    expect_contains("live nupkg", attempt_install(), "VRCOSC-2026.807.0-live-full.nupkg")?
+}
+
+test "the beta channel picks the prerelease package" {
+    serve_channels()
+    set_text(VRCOSC_BRANCH, "beta")
+    const out = attempt_install()
+    expect_contains("beta nupkg", out, "VRCOSC-2026.906.0-beta-full.nupkg")?
+    expect_not_contains("and does not silently fall back to the live package", out, "live-full.nupkg")?
+}
+
+test "says so when the channel has no package at all" {
+    serve_channels()
+    set_env("FAKE_CURL_BODY", "[\{\"tag_name\":\"2026.807.0\",\"prerelease\":false,\"assets\":[]}]")
+    set_text(VRCOSC_BRANCH, "beta")
+    expect_contains("skips", attempt_install(), "skipping VRCOSC download")?
+}

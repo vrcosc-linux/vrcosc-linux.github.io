@@ -1,0 +1,130 @@
+// The command line: usage text and argument parsing.
+import { BOLD, CYAN, NC, SCRIPT_VERSION } from "constants.ab"
+import * from "state.ab"
+import { log_error, log_warn } from "log.ab"
+
+pub fun print_usage(): Null {
+    echo("{BOLD}VRCOSC Linux Installer & Manager{NC} {CYAN}v{SCRIPT_VERSION}{NC}")
+    echo("")
+    echo("{BOLD}Usage:{NC}")
+    echo("  bash install.sh [OPTIONS]")
+    echo("")
+    echo("{BOLD}Options:{NC}")
+    echo("  -V, --version             Print this installer's version and exit")
+    echo("  -i, --info                Display diagnostic system, prefix, runtime, and VRCOSC environment info")
+    echo("  -b, --backup              Create a high-compression backup of VRCOSC configs & prefix registries to Desktop")
+    echo("  -f, --force               Force re-download and re-installation of .NET and VRCOSC")
+    echo("      --branch <live|beta>  Specify release channel to install (default: live)")
+    echo("  -u, --uninstall           Uninstall VRCOSC binaries, launcher script, and desktop shortcut")
+    echo("      --purge               Also delete VRCOSC's settings, profiles and logs for the")
+    echo("                            selected --branch. Use with --uninstall to remove binaries")
+    echo("                            too, or on its own to delete only settings. Installs")
+    echo("                            nothing. Follows the config directory if it is a symlink.")
+    echo("      --dry-run             Simulate actions without writing files or running installers")
+    echo("      --no-firewall         Inspect firewall rules but add none")
+    echo("      --no-patch            Leave VRChat's launch.exe alone. The bridge is what makes")
+    echo("                            vrchat:// navigation work from VRCOSC and companion tools;")
+    echo("                            without it everything else still works.")
+    echo("      --prefix <PATH>       Explicitly specify the VRChat compatdata/438100 folder")
+    echo("      --runtime <MODE>      Steam Runtime mode for wine calls (default: auto)")
+    echo("                              auto       probe modes below and use the first clean one")
+    echo("                              no-bwrap   Steam Runtime without bwrap containerisation")
+    echo("                              host       no Steam Runtime; use host libraries only")
+    echo("                              container  Steam Runtime with bwrap containerisation")
+    echo("  -h, --help                Show this help message")
+}
+
+// The value following an option, or empty when there is none.
+fun value_after(args: [Text], index: Int): Text {
+    if index + 1 < len(args) {
+        return args[index + 1]
+    }
+    return ""
+}
+
+// Reads the flags into the state module. Options that take a value consume the
+// next argument.
+pub fun parse_arguments(args: [Text]): Null {
+    let i = 0
+    while i < len(args) {
+        const arg = args[i]
+        if {
+            arg == "-i" or arg == "--info" {
+                INFO_MODE = true
+            }
+            arg == "-b" or arg == "--backup" {
+                BACKUP_MODE = true
+            }
+            arg == "-f" or arg == "--force" {
+                FORCE_INSTALL = true
+            }
+            arg == "-u" or arg == "--uninstall" {
+                UNINSTALL_MODE = true
+            }
+            arg == "--purge" {
+                PURGE_MODE = true
+            }
+            arg == "--branch" {
+                const value = value_after(args, i)
+                if value == "" {
+                    log_error("Error: --branch requires an argument (live or beta).")
+                    exit(1)
+                }
+                if value != "live" and value != "beta" {
+                    // Only "beta" was ever special-cased, so a typo installed
+                    // live under whatever name the user typed.
+                    log_error("Error: unknown branch '{value}'. Use 'live' or 'beta'.")
+                    exit(1)
+                }
+                VRCOSC_BRANCH = value
+                i += 1
+            }
+            arg == "--prefix" {
+                const value = value_after(args, i)
+                if value == "" {
+                    log_error("Error: --prefix requires a directory path.")
+                    exit(1)
+                }
+                VRC_COMPATDATA = value
+                i += 1
+            }
+            arg == "--runtime" {
+                const value = value_after(args, i)
+                if value != "auto" and value != "no-bwrap" and value != "host" and value != "container" {
+                    log_error("Error: --runtime requires one of: auto, no-bwrap, host, container.")
+                    exit(1)
+                }
+                RUNTIME_MODE = value
+                i += 1
+            }
+            arg == "--dry-run" {
+                DRY_RUN = true
+            }
+            arg == "--no-firewall" or arg == "--skip-firewall" {
+                NO_FIREWALL = true
+            }
+            arg == "--no-patch" {
+                PATCH_LAUNCH = false
+            }
+            arg == "--patch" or arg == "--path" {
+                // Accepted because it was briefly the documented spelling; patching is
+                // the default now, so this only states it explicitly.
+                PATCH_LAUNCH = true
+            }
+            arg == "-V" or arg == "--version" {
+                echo("vrcosc-linux install.sh {SCRIPT_VERSION}")
+                exit(0)
+            }
+            arg == "-h" or arg == "--help" {
+                print_usage()
+                exit(0)
+            }
+            else {
+                log_warn("Unknown argument: {arg}")
+                print_usage()
+                exit(1)
+            }
+        }
+        i += 1
+    }
+}

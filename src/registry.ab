@@ -1,0 +1,66 @@
+// The WPF hardware-acceleration registry patch, which is what stops VRCOSC from
+// opening as a black window under wine.
+import { VRC_COMPATDATA, DRY_RUN } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { file_exists } from "util.ab"
+import { run_in_prefix, vrchat_is_running } from "runtime.ab"
+
+// True when the prefix registry already carries the patch, so a reinstall does
+// not need to write it at all.
+pub fun wpf_registry_fix_applied(): Bool {
+    const user_reg = "{VRC_COMPATDATA}/pfx/user.reg"
+    if not file_exists(user_reg) {
+        return false
+    }
+    trust silent $ grep -qi 'Avalon\.Graphics' "{user_reg}" $
+    if status() != 0 {
+        return false
+    }
+    trust silent $ grep -qi '"DisableHWAcceleration"=dword:00000001' "{user_reg}" $
+    return status() == 0
+}
+
+pub fun apply_wpf_registry_fix(): Null? {
+    log_info("Applying WPF hardware acceleration registry fix (prevents black window bug)...")
+    if DRY_RUN {
+        return null
+    }
+
+    if wpf_registry_fix_applied() {
+        log_success("WPF registry patch already present in the prefix; leaving it alone.")
+        return null
+    }
+
+    // A wineserver holds the registry in memory and writes user.reg/system.reg
+    // wholesale when it exits. protontricks starts a second wineserver on the same
+    // prefix, so ours saves the patch seconds from now and VRChat's overwrites it
+    // hours from now with a snapshot taken before the patch existed. Writing here
+    // would report success and leave nothing behind.
+    if vrchat_is_running() {
+        log_warn("VRChat is running, so this patch cannot be written: its wineserver will")
+        log_warn("rewrite the registry from memory when it exits and discard ours.")
+        log_warn("Close VRChat and run the installer again. Until then VRCOSC may open as")
+        log_warn("a black window.")
+        return null
+    }
+
+    const reg_file = "{VRC_COMPATDATA}/pfx/drive_c/vrcosc_disable_hw_acc.reg"
+
+    $ cat << 'EOF_REG' > "{reg_file}"
+Windows Registry Editor Version 5.00
+
+[HKEY_CURRENT_USER\Software\Microsoft\Avalon.Graphics]
+"DisableHWAcceleration"=dword:00000001
+
+[HKEY_LOCAL_MACHINE\Software\Microsoft\Avalon.Graphics]
+"DisableHWAcceleration"=dword:00000001
+EOF_REG
+$?
+
+    // Forward slashes: protontricks passes the command through sh -c unescaped, so
+    // "C:\vrcosc..." reaches wine as "C:vrcosc...", a drive-relative path that
+    // happens to resolve only because wine starts at the root of drive C.
+    run_in_prefix("wine regedit C:/vrcosc_disable_hw_acc.reg")?
+    trust $ rm -f "{reg_file}" $
+    log_success("WPF registry patch applied successfully.")
+}

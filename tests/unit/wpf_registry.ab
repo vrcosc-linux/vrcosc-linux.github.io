@@ -1,0 +1,92 @@
+// A wineserver holds the prefix registry in memory and writes user.reg wholesale
+// when it exits. Writing the WPF patch while VRChat's wineserver is alive reports
+// success and leaves nothing behind once VRChat closes, which surfaces much later
+// as the black-window bug on a machine the installer said it had fixed.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, DRY_RUN } from "../../src/state.ab"
+import { wpf_registry_fix_applied, apply_wpf_registry_fix } from "../../src/registry.ab"
+import { read_file } from "../../src/util.ab"
+
+const WORK = work_dir()
+const BIN = "{WORK}/bin"
+set_text(VRC_COMPATDATA, make_prefix("{WORK}/steam"))
+const USER_REG = "{VRC_COMPATDATA}/pfx/user.reg"
+const PT_LOG = "{WORK}/pt.log"
+
+// Stand in for protontricks, so nothing here starts wine. Its log is how the
+// tests see what was asked of wine.
+install_fake(BIN, "fake-protontricks", "protontricks")
+prepend_path(BIN)
+set_env("FAKE_PT_LOG", PT_LOG)
+
+fun patched_reg(): Null {
+    write_file(USER_REG, "[Software\\\\Microsoft\\\\Avalon.Graphics]\n\"DisableHWAcceleration\"=dword:00000001\n")
+}
+
+fun unpatched_reg(): Null {
+    write_file(USER_REG, "WINE REGISTRY Version 2\n")
+}
+
+// Applies the fix, capturing its output; ok reports whether it returned cleanly.
+let OK = true
+fun apply(): Text {
+    trust $ rm -f "{PT_LOG}" $
+    set_bool(OK, true)
+    capture_start()
+    apply_wpf_registry_fix() failed {
+        set_bool(OK, false)
+    }
+    return capture_stop()
+}
+
+fun start_vrchat(): Null {
+    start_named_process(WORK, "VRChat.exe", ["WINEPREFIX={VRC_COMPATDATA}/pfx/", "PRESSURE_VESSEL_RUNTIME=steamrt4"])
+}
+
+test "an unpatched prefix is reported as unpatched" {
+    unpatched_reg()
+    expect_false("unpatched", wpf_registry_fix_applied())?
+}
+
+test "a patched prefix is recognised" {
+    patched_reg()
+    expect_true("patched", wpf_registry_fix_applied())?
+}
+
+test "a prefix with the key but acceleration left on is not patched" {
+    write_file(USER_REG, "[Software\\\\Microsoft\\\\Avalon.Graphics]\n\"DisableHWAcceleration\"=dword:00000000\n")
+    expect_false("not patched", wpf_registry_fix_applied())?
+}
+
+test "writes the patch when it is missing and nothing holds the prefix" {
+    unpatched_reg()
+    apply()
+    const calls = read_file(PT_LOG)
+    expect_contains("runs regedit", calls, "regedit")?
+    // protontricks runs the command through sh -c unescaped, so a backslash would be
+    // eaten and "C:\vrcosc..." would arrive as "C:vrcosc...".
+    expect_contains("and reaches wine with an absolute path, not a drive-relative one", calls, "C:/vrcosc_disable_hw_acc.reg")?
+}
+
+test "does not rewrite a patch that is already there" {
+    patched_reg()
+    const out = apply()
+    expect_missing("no wine call", PT_LOG)?
+    expect_contains("and says so", out, "already present")?
+}
+
+test "refuses to write while VRChat holds the prefix" {
+    unpatched_reg()
+    start_vrchat()
+    const out = apply()
+    expect_missing("no wine call", PT_LOG)?
+    expect_contains("and explains that the write would be discarded", out, "discard ours")?
+    expect_contains("and says what to do about it", out, "Close VRChat and run the installer again")?
+    expect_true("but does not abort the rest of the install over it", OK)?
+}
+
+test "an already-patched prefix is fine even with VRChat running" {
+    patched_reg()
+    start_vrchat()
+    expect_contains("already present", apply(), "already present")?
+}

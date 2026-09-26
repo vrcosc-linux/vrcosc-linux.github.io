@@ -1,0 +1,168 @@
+// Builds a synthetic Steam library containing a compatdata/438100 prefix, shaped
+// closely enough for install.sh to treat it as real. Prints the compatdata path.
+//
+//   make-prefix --root DIR [--proton NAME] [--dotnet 9.0.14,8.0.27]
+//                          [--tfm net9.0-windows] [--vrcosc-version 2026.807.0]
+//                          [--no-vrcosc] [--wpf-patched] [--no-frameworks]
+import { echo_err } from "../../src/util.ab"
+import { split } from "std/text"
+
+main(args) {
+    const argv = args[1..len(args)]
+    let root = ""
+    let proton = "proton-rtsp-11.0-20260609-4"
+    let proton_ver = "11.0-100"
+    let dotnet_runtimes = ""
+    let tfm = "net9.0-windows"
+    let vrcosc_version = "2026.807.0"
+    let install_vrcosc = true
+    let wpf_patched = false
+    let no_frameworks = false
+
+    let i = 0
+    while i < len(argv) {
+        const arg = argv[i]
+        if {
+            arg == "--root" {
+                root = argv[i + 1]
+                i += 1
+            }
+            arg == "--proton" {
+                proton = argv[i + 1]
+                i += 1
+            }
+            arg == "--proton-version" {
+                proton_ver = argv[i + 1]
+                i += 1
+            }
+            arg == "--dotnet" {
+                dotnet_runtimes = argv[i + 1]
+                i += 1
+            }
+            arg == "--tfm" {
+                tfm = argv[i + 1]
+                i += 1
+            }
+            arg == "--vrcosc-version" {
+                vrcosc_version = argv[i + 1]
+                i += 1
+            }
+            arg == "--no-vrcosc": install_vrcosc = false
+            arg == "--no-frameworks": no_frameworks = true // only "tfm" identifies the runtime
+            arg == "--wpf-patched": wpf_patched = true
+            else {
+                echo_err("make-prefix: unknown argument: {arg}")
+                exit(1)
+            }
+        }
+        i += 1
+    }
+
+    if root == "" {
+        echo_err("make-prefix: --root is required")
+        exit(1)
+    }
+
+    const steamapps = "{root}/steamapps"
+    const compatdata = "{steamapps}/compatdata/438100"
+    const drive_c = "{compatdata}/pfx/drive_c"
+    const proton_root = "{root}/compatibilitytools.d/{proton}"
+
+    $ mkdir -p "{drive_c}/users/steamuser/AppData/Local" \
+             "{drive_c}/users/steamuser/AppData/Roaming" \
+             "{drive_c}/Program Files" \
+             "{steamapps}/common/VRChat" \
+             "{proton_root}/files/share/fonts" $?
+
+    // Proton build metadata, as Steam writes it.
+    $ printf '%s\n%s/files/share/fonts/\n%s/files/lib/\n' "{proton_ver}" "{proton_root}" "{proton_root}" > "{compatdata}/config_info" $?
+
+    $ cat > "{proton_root}/toolmanifest.vdf" <<VDF
+"manifest"
+\{
+  "version" "2"
+  "commandline" "/proton %verb%"
+  "require_tool_appid" "4183110"
+  "compatmanager_layer_name" "proton"
+}
+VDF
+$?
+
+    $ : > "{compatdata}/pfx/user.reg" $?
+    $ : > "{compatdata}/pfx/system.reg" $?
+    if wpf_patched {
+        $ printf '[Software\\\\\\\\Microsoft\\\\\\\\Avalon.Graphics]\n"DisableHWAcceleration"=dword:00000001\n' > "{compatdata}/pfx/user.reg" $?
+    }
+
+    // Stub the VRChat launcher so the bridge-patch check has something to look at.
+    $ printf 'MZ stub launch.exe\n' > "{steamapps}/common/VRChat/launch.exe" $?
+
+    if dotnet_runtimes != "" {
+        const dotnet_dir = "{drive_c}/Program Files/dotnet"
+        $ mkdir -p "{dotnet_dir}/shared/Microsoft.WindowsDesktop.App" $?
+        $ touch "{dotnet_dir}/dotnet.exe" $?
+        for v in split(dotnet_runtimes, ",") {
+            $ mkdir -p "{dotnet_dir}/shared/Microsoft.WindowsDesktop.App/{v}" $?
+        }
+    }
+
+    if install_vrcosc {
+        const app_dir = "{drive_c}/users/steamuser/AppData/Local/VRCOSC"
+        $ mkdir -p "{app_dir}" $?
+        $ touch "{app_dir}/VRCOSC.dll" $?
+        // "net9.0-windows" -> "9.0"
+        const major_minor = trust $ printf '%s' "{tfm}" | sed -E 's/^net([0-9]+\.[0-9]+).*/\1/' $
+        if no_frameworks {
+            $ cat > "{app_dir}/VRCOSC.runtimeconfig.json" <<JSON
+\{
+  "runtimeOptions": \{
+    "tfm": "{tfm}",
+    "frameworks": []
+  }
+}
+JSON
+$?
+        } else {
+            $ cat > "{app_dir}/VRCOSC.runtimeconfig.json" <<JSON
+\{
+  "runtimeOptions": \{
+    "tfm": "{tfm}",
+    "frameworks": [
+      \{ "name": "Microsoft.NETCore.App", "version": "{major_minor}.0" },
+      \{ "name": "Microsoft.WindowsDesktop.App", "version": "{major_minor}.0" }
+    ]
+  }
+}
+JSON
+$?
+        }
+        // The shape a real VRCOSC.deps.json has: the version appears as a dependency
+        // entry under targets, and as a "<name>/<version>" key under libraries. A
+        // fixture that puts it anywhere else cannot notice the layout changing.
+        $ cat > "{app_dir}/VRCOSC.deps.json" <<JSON
+\{
+  "runtimeTarget": \{ "name": "{tfm}", "signature": "" },
+  "targets": \{
+    "{tfm}": \{
+      "VRCOSC/1.0.0": \{
+        "dependencies": \{
+          "VRCOSC.App": "{vrcosc_version}"
+        },
+        "runtime": \{ "VRCOSC.dll": \{} }
+      },
+      "VRCOSC.App/{vrcosc_version}": \{
+        "runtime": \{ "VRCOSC.App.dll": \{} }
+      }
+    }
+  },
+  "libraries": \{
+    "VRCOSC/1.0.0": \{ "type": "project", "serviceable": false },
+    "VRCOSC.App/{vrcosc_version}": \{ "type": "package", "serviceable": true }
+  }
+}
+JSON
+$?
+    }
+
+    echo(compatdata)
+}

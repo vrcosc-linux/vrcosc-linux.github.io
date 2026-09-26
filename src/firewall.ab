@@ -1,0 +1,159 @@
+// The OSC and OSCQuery mDNS ports: reporting what the firewall says and, unless
+// told not to, opening them.
+import { GREEN, YELLOW, CYAN, NC } from "constants.ab"
+import { NO_FIREWALL, DRY_RUN } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { have_cmd, matches } from "util.ab"
+
+pub const OSC_PORTS = ["9000", "9001", "5353"]
+
+// True when passwordless sudo is available right now.
+fun can_sudo(): Bool {
+    trust silent $ sudo -n true $
+    return status() == 0
+}
+
+// Uninstall does not close the OSC ports. Removing a firewall rule this installer
+// may not have added, on a machine where something else may now depend on it, is
+// not a safe thing to do unprompted -- but leaving it unmentioned would make
+// "cleanly remove" untrue. So: say what is still open and how to close it.
+pub fun report_firewall_rules_on_uninstall(): Null {
+    if not have_cmd("firewall-cmd") {
+        return null
+    }
+    const out = trust $ sudo -n firewall-cmd --list-ports 2>/dev/null || firewall-cmd --list-ports 2>/dev/null || true $
+    if not matches(out, "9000|9001|5353") {
+        return null
+    }
+
+    log_warn("The OSC ports are still open in your firewall: {out}")
+    log_warn("They are left alone because something else may now rely on them. To close:")
+    echo("  {CYAN}sudo firewall-cmd --permanent --remove-port=9000-9001/udp --remove-port=5353/udp && sudo firewall-cmd --reload{NC}")
+}
+
+// Report whatever the firewall already says about the OSC ports. This is the whole
+// of --no-firewall's job: someone who does not want the installer touching their
+// firewall still needs to know whether the ports are open, because a blocked 9001
+// looks exactly like VRCOSC not working.
+pub fun report_firewall_rules(): Null {
+    let found = false
+
+    if have_cmd("firewall-cmd") {
+        const out = trust $ sudo -n firewall-cmd --list-all 2>/dev/null || firewall-cmd --list-all 2>/dev/null || true $
+        if out != "" {
+            let zone = trust $ head -n 1 <<< "{out}" | awk '\{print \$1}' $
+            const ports = trust $ grep -E '^\s*ports:' <<< "{out}" | sed 's/^\s*ports:\s*//' $
+            const services = trust $ grep -E '^\s*services:' <<< "{out}" | sed 's/^\s*services:\s*//' $
+            if zone == "" {
+                zone = "unknown"
+            }
+            echo("  * firewalld zone:      {CYAN}{zone}{NC}")
+            echo("  * open udp ports:      {CYAN}{ports != "" then ports else "none"}{NC}")
+            if services != "" {
+                echo("  * services:            {CYAN}{services}{NC}")
+            }
+            for p in OSC_PORTS {
+                if {
+                    matches(ports, "(^|[[:space:]]){p}/udp") {
+                        echo("  * {p}/udp:            {GREEN}explicitly allowed{NC}")
+                    }
+                    matches(ports, "[0-9]+-[0-9]+/udp") {
+                        echo("  * {p}/udp:            {CYAN}may be covered by a port range above{NC}")
+                    }
+                    else {
+                        echo("  * {p}/udp:            {YELLOW}not listed{NC}")
+                    }
+                }
+            }
+            found = true
+        }
+    }
+
+    if not found and have_cmd("ufw") {
+        const out = trust $ sudo -n ufw status 2>/dev/null || true $
+        if out != "" {
+            echo("  * ufw:                 {CYAN}{trust $ head -n 1 <<< "{out}" $}{NC}")
+            const rules = trust $ grep -E '9000|9001|5353' <<< "{out}" | sed 's/^/      /' $
+            if rules != "" {
+                echo(rules)
+            } else {
+                echo("      {YELLOW}no rules for 9000, 9001 or 5353{NC}")
+            }
+            found = true
+        }
+    }
+
+    if not found and have_cmd("iptables") {
+        const out = trust $ sudo -n iptables -S INPUT 2>/dev/null | grep -E 'dport (9000|9001|5353)' || true $
+        if out != "" {
+            echo(trust $ printf '%s\n' "{out}" | sed 's/^/      /' $)
+        } else {
+            echo("      {YELLOW}no iptables INPUT rules for 9000, 9001 or 5353{NC}")
+        }
+        found = true
+    }
+
+    if not found {
+        // Naming the ports even here: someone reading this output is trying to work
+        // out whether a port is blocked, and "no tool found" alone does not tell
+        // them which ports they would have to check by hand.
+        echo("  * {YELLOW}no firewall tool found to inspect (firewall-cmd, ufw, iptables){NC}")
+        echo("      {YELLOW}9000/udp, 9001/udp and 5353/udp could not be checked{NC}")
+    }
+}
+
+// VRChat and VRCOSC on the same machine talk over loopback, which no firewall
+// rule affects. These ports are opened for the cases that do cross the network:
+// OSC clients on another device, and OSCQuery's mDNS discovery. Refuse the whole
+// thing with --no-firewall, which still reports what is already open.
+pub fun configure_firewall(): Null {
+    log_info("Checking firewall configuration for OSC and OSCQuery mDNS ports (9000/9001/5353 UDP)...")
+    report_firewall_rules()
+
+    if NO_FIREWALL {
+        log_info("Not adding any firewall rules (--no-firewall).")
+        return null
+    }
+
+    if DRY_RUN {
+        return null
+    }
+
+    let applied = false
+    if {
+        have_cmd("firewall-cmd") and can_sudo() {
+            log_info("Applying firewalld rules...")
+            for p in OSC_PORTS {
+                trust silent $ sudo -n firewall-cmd --add-port={p}/udp --permanent $
+            }
+            trust silent $ sudo -n firewall-cmd --reload $
+            applied = true
+        }
+        have_cmd("ufw") and can_sudo() {
+            log_info("Applying UFW rules...")
+            for p in OSC_PORTS {
+                trust silent $ sudo -n ufw allow {p}/udp $
+            }
+            trust silent $ sudo -n ufw reload $
+            applied = true
+        }
+        have_cmd("iptables") and can_sudo() {
+            log_info("Applying iptables rules...")
+            for p in OSC_PORTS {
+                trust silent $ sudo -n iptables -I INPUT -p udp --dport {p} -j ACCEPT $
+            }
+            applied = true
+            // Unlike the firewalld and ufw branches, these are in-memory only.
+            log_warn("iptables rules are not persistent and will be gone after a reboot.")
+            log_warn("Save them with your distribution's iptables-persistent equivalent, or")
+            log_warn("just run this installer again.")
+        }
+    }
+
+    if not applied {
+        log_warn("Note: Automatic firewall rules were skipped (root privileges required).")
+        echo("If VRChat fails to auto-discover VRCOSC, manually allow UDP ports 9000, 9001, and 5353 in your firewall.")
+    } else {
+        log_success("Firewall rules configured successfully.")
+    }
+}

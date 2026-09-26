@@ -1,0 +1,64 @@
+// Argument validation. --branch was the one flag that accepted anything and then
+// quietly did something else: only "beta" was special-cased, so a typo installed
+// live into a directory named after the typo.
+import * from "../lib/harness.ab"
+import { matches } from "../../src/util.ab"
+import { SCRIPT_VERSION } from "../../src/constants.ab"
+
+const INSTALL = install_sh()
+
+fun run(args: [Text]): Text {
+    const out = trust $ bash "{INSTALL}" {args} 2>&1 $
+    set_int(LAST_RC, status())
+    return out
+}
+
+test "--branch rejects a value that is neither channel" {
+    const out = run(["--branch", "stable"])
+    expect_true("exits non-zero", LAST_RC != 0)?
+    expect_contains("and names what it will accept", out, "Use 'live' or 'beta'")?
+    expect_contains("and echoes what it was given, so a typo is obvious", out, "stable")?
+}
+
+test "--branch live and beta are still accepted" {
+    run(["--branch", "live", "--help"])
+    expect_eq("--branch live", "0", "{LAST_RC}")?
+    run(["--branch", "beta", "--help"])
+    expect_eq("--branch beta", "0", "{LAST_RC}")?
+}
+
+test "--branch with no value still fails" {
+    run(["--branch"])
+    expect_true("exits non-zero", LAST_RC != 0)?
+}
+
+// --- the installer's own version ----------------------------------------------
+// Distinct from the VRCOSC release it installs, and the first thing to ask for in
+// a bug report -- so it has to be reachable without a prefix or a network.
+
+test "--version prints a version and exits cleanly" {
+    const out = run(["--version"])
+    expect_eq("exits 0", "0", "{LAST_RC}")?
+    expect_contains("and it looks like a version", out, "install.sh ")?
+    expect_true("matches x.y.z", matches(out, "[0-9]+\.[0-9]+\.[0-9]+"))?
+    expect_eq("-V is the same thing", out, run(["-V"]))?
+    expect_eq("and it is the version the sources declare", "vrcosc-linux install.sh {SCRIPT_VERSION}", out)?
+}
+
+test "--help carries the version too" {
+    const version = trust $ bash "{INSTALL}" --version 2>&1 | awk '\{print \$NF}' $
+    expect_contains("help shows v<version>", run(["--help"]), "v{version}")?
+}
+
+test "the git tag, when there is one, matches the script" {
+    // A tag that does not match what --version reports makes every bug report
+    // ambiguous about which build is being described.
+    const tag = trust $ git -C "{repo_root()}" describe --tags --abbrev=0 2>/dev/null || true $
+    if tag == "" {
+        echo("  PASS no tag yet, nothing to match")
+    } else {
+        const version = trust $ bash "{INSTALL}" --version 2>&1 | awk '\{print \$NF}' $
+        const bare = trust $ printf '%s' "{tag}" | sed 's/^v//' $
+        expect_eq("tag matches --version", version, bare)?
+    }
+}

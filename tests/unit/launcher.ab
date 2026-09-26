@@ -1,0 +1,58 @@
+// The launcher is what users actually run day to day, and it is regenerated on
+// every install -- so it must be valid shell and must scrub the environment
+// itself, independent of whatever shell the desktop entry is launched from.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, VRCOSC_BRANCH, DRY_RUN, RESOLVED_RUNTIME_MODE } from "../../src/state.ab"
+import { create_launchers } from "../../src/launcher.ab"
+import { get_launcher_script } from "../../src/paths.ab"
+import { read_file } from "../../src/util.ab"
+
+const WORK = work_dir()
+const BIN = "{WORK}/bin"
+set_home("{WORK}/home")
+install_fake(BIN, "fake-protontricks", "protontricks")
+set_text(VRC_COMPATDATA, make_prefix("{WORK}/steam", ["--dotnet", "9.0.14"]))
+const PT_LOG = "{WORK}/pt.log"
+
+fun generate_for(mode: Text, branch: Text): Text {
+    set_text(RESOLVED_RUNTIME_MODE, mode)
+    set_text(VRCOSC_BRANCH, branch)
+    trust $ rm -f "{get_launcher_script()}" $
+    capture_start()
+    create_launchers() failed {}
+    capture_stop()
+    return get_launcher_script()
+}
+
+// Runs the generated launcher with the fake protontricks on PATH and the given
+// extra environment; whatever reached protontricks is in PT_LOG afterwards.
+fun run_launcher(launcher: Text, env_vars: [Text], args: [Text]): Null {
+    trust $ : > "{PT_LOG}" $
+    trust $ env PATH="{BIN}:/usr/bin:/bin" FAKE_PT_LOG="{PT_LOG}" {env_vars} bash "{launcher}" {args} >/dev/null 2>&1 $
+}
+
+test "generates a valid launcher for each mode that scrubs at run time" {
+    for mode in ["no-bwrap", "host", "container"] {
+        const launcher = generate_for(mode, "live")
+        expect_exists("generates a launcher for {mode} mode", launcher)?
+        const err = trust $ bash -n "{launcher}" 2>&1 $
+        expect_eq("the {mode} launcher is syntactically valid", "", err)?
+        run_launcher(launcher, ["LD_LIBRARY_PATH=/runtime/lib", "FONTCONFIG_PATH=/runtime/etc/fonts"], [Text])
+        expect_not_contains("the {mode} launcher scrubs leaked runtime variables at run time", read_file(PT_LOG), "ENV: ")?
+    }
+}
+
+test "bakes the resolved runtime flags into the launcher" {
+    expect_contains("host flags", read_file(generate_for("host", "live")), "--no-runtime")?
+    expect_not_contains("uses no runtime flags for container mode", read_file(generate_for("container", "live")), "--no-runtime")?
+}
+
+test "points each launcher at its install directory" {
+    expect_contains("live", read_file(generate_for("no-bwrap", "live")), "AppData/Local/VRCOSC/VRCOSC.dll")?
+    expect_contains("beta", read_file(generate_for("no-bwrap", "beta")), "AppData/Local/VRCOSC-beta/VRCOSC.dll")?
+}
+
+test "forwards its own arguments through to VRCOSC" {
+    run_launcher(generate_for("no-bwrap", "live"), [Text], ["--some-vrcosc-flag"])
+    expect_contains("flag reached protontricks", read_file(PT_LOG), "--some-vrcosc-flag")?
+}

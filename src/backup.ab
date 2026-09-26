@@ -1,0 +1,108 @@
+// --backup: everything a user would want back before something destructive.
+import { CYAN, NC } from "constants.ab"
+import { VRC_COMPATDATA } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { have_cmd, glob, dir_exists, file_exists, path_exists, basename, mkdir_p } from "util.ab"
+import { get_all_installed_files } from "paths.ab"
+import { locate_vrchat_prefix } from "prefix.ab"
+
+pub fun create_backup(): Null? {
+    log_info("Initiating VRCOSC and prefix backup...")
+    locate_vrchat_prefix()
+
+    const desktop_dir = trust $ xdg-user-dir DESKTOP 2>/dev/null || echo "\$HOME/Desktop" $
+    $ mkdir -p "{desktop_dir}" $?
+
+    const timestamp = trust $ date +%s $
+    // mkdir -p on a fixed name succeeds on a directory someone else created and
+    // can read, and the staged copy includes module settings with API tokens in it.
+    const stage_dir = $ mktemp -d "\$\{TMPDIR:-/tmp}/vrcosc_backup_{timestamp}.XXXXXX" $?
+
+    let items_found = false
+
+    // 1. Config directories (Roaming/VRCOSC, Roaming/VRCOSC-Beta)
+    //
+    // -L, not -a: a config directory is very often a symlink to cloud storage, and
+    // copying the link instead of what it points at produced a backup containing a
+    // 62-byte path string in place of every setting and profile. This is the one
+    // feature whose whole job is to be correct before something destructive.
+    //
+    // runtime/ and logs/ are left out. They are caches VRCOSC rebuilds, they are
+    // the bulk of the size (540 MB and growing here), and a backup nobody can
+    // afford to keep is a backup nobody makes.
+    for u in glob("{VRC_COMPATDATA}/pfx/drive_c/users/*") {
+        const username = basename(u)
+        for folder in ["VRCOSC", "VRCOSC-Beta"] {
+            const src = "{u}/AppData/Roaming/{folder}"
+            if not dir_exists(src) {
+                continue
+            }
+            const dest = "{stage_dir}/users/{username}/AppData/Roaming/{folder}"
+            mkdir_p(dest)
+            for entry in glob("{src}/*") {
+                if not path_exists(entry) {
+                    continue
+                }
+                const name = basename(entry)
+                if name == "runtime" or name == "logs" {
+                    log_info("  skipping {folder}/{name} (regenerated cache)")
+                    continue
+                }
+                trust silent $ cp -RL "{entry}" "{dest}/" $
+                if status() != 0 {
+                    $ cp -R "{entry}" "{dest}/" $?
+                }
+            }
+            items_found = true
+        }
+    }
+
+    // Prune any broken or circular symbolic links to avoid compression errors
+    trust silent $ find "{stage_dir}" -xtype l -delete $
+
+    // 2. Wine prefix registry files
+    for reg in ["user.reg", "system.reg"] {
+        if file_exists("{VRC_COMPATDATA}/pfx/{reg}") {
+            $ cp "{VRC_COMPATDATA}/pfx/{reg}" "{stage_dir}/" $?
+            items_found = true
+        }
+    }
+
+    // 3. Launchers & desktop shortcuts
+    for f in get_all_installed_files() {
+        if file_exists(f) {
+            mkdir_p("{stage_dir}/launchers")
+            $ cp "{f}" "{stage_dir}/launchers/" $?
+            items_found = true
+        }
+    }
+
+    if not items_found {
+        log_warn("No VRCOSC configurations or registries found to backup.")
+        trust $ rm -rf "{stage_dir}" $
+        return null
+    }
+
+    let archive_path = ""
+    if {
+        have_cmd("7z") {
+            archive_path = "{desktop_dir}/VRCOSC_backup_{timestamp}.7z"
+            log_info("Compressing backup using 7z (LZMA2 ultra compression)...")
+            $ 7z a -t7z -m0=lzma2 -mx=9 -snl -bso0 -bsp0 "{archive_path}" "{stage_dir}"/* $?
+        }
+        have_cmd("tar") and have_cmd("xz") {
+            archive_path = "{desktop_dir}/VRCOSC_backup_{timestamp}.tar.xz"
+            log_info("Compressing backup using tar.xz (max compression)...")
+            $ XZ_OPT="-9e" tar -cJf "{archive_path}" -C "{stage_dir}" . $?
+        }
+        else {
+            archive_path = "{desktop_dir}/VRCOSC_backup_{timestamp}.tar.gz"
+            log_info("Compressing backup using tar.gz...")
+            $ tar -czf "{archive_path}" -C "{stage_dir}" . $?
+        }
+    }
+
+    trust $ rm -rf "{stage_dir}" $
+    log_success("Backup created successfully:")
+    echo("  * {CYAN}{archive_path}{NC}")
+}

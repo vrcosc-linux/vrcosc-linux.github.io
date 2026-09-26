@@ -1,0 +1,67 @@
+// The flatpak permissions protontricks needs when it is the flatpak build.
+import { CYAN, YELLOW, NC, PROTONTRICKS_OVERRIDES, PROTONTRICKS_FLATPAK_ID } from "constants.ab"
+import { DRY_RUN } from "state.ab"
+import { log_info, log_success } from "log.ab"
+import { replace_one } from "std/text"
+
+// True when the protontricks we will actually invoke is the flatpak one. The
+// override only means anything then: it used to run whenever any flatpak matched
+// "protontricks" in a listing, including when the protontricks on PATH was pipx's.
+pub fun protontricks_is_flatpak(): Bool {
+    trust silent $ flatpak list --app 2>/dev/null | grep -q 'com\.github\.Matoking\.protontricks' $
+    if status() != 0 {
+        return false
+    }
+    // A `protontricks` on PATH that is not a flatpak wrapper is the one that runs.
+    const bin = trust $ command -v protontricks 2>/dev/null $
+    if bin == "" {
+        return true
+    }
+    trust silent $ grep -qi 'flatpak' "{bin}" $
+    return status() == 0
+}
+
+pub fun configure_protontricks_permissions(): Null {
+    if not protontricks_is_flatpak() {
+        return null
+    }
+
+    log_info("Granting flatpak permissions protontricks needs:")
+    for ov in PROTONTRICKS_OVERRIDES {
+        echo("  * {CYAN}{ov}{NC}")
+    }
+    echo("  {YELLOW}--talk-name=org.freedesktop.Flatpak lets protontricks run commands outside")
+    echo("  its sandbox; it needs that to start Proton's wine. --uninstall takes these")
+    echo("  back off again. See the README for why each one is here.{NC}")
+    if DRY_RUN {
+        return null
+    }
+
+    for ov in PROTONTRICKS_OVERRIDES {
+        trust $ flatpak override --user "{ov}" {PROTONTRICKS_FLATPAK_ID} $
+    }
+}
+
+// Takes the grants above back off. Only ours: --reset would also drop overrides
+// the user set themselves. Returns true when there were grants to revoke.
+pub fun revoke_protontricks_permissions(): Bool {
+    if not protontricks_is_flatpak() {
+        return false
+    }
+
+    for ov in PROTONTRICKS_OVERRIDES {
+        // "--nofilesystem=host" undoes "--filesystem=host"; a --talk-name is
+        // undone by --no-talk-name.
+        let undo = replace_one(ov, "--filesystem=", "--nofilesystem=")
+        undo = replace_one(undo, "--talk-name=", "--no-talk-name=")
+        if DRY_RUN {
+            log_info("Would revoke flatpak permission: {ov}")
+        } else {
+            trust silent $ flatpak override --user "{undo}" {PROTONTRICKS_FLATPAK_ID} $
+        }
+    }
+    if not DRY_RUN {
+        log_success("Revoked the flatpak permissions this installer granted.")
+    }
+    return true
+}

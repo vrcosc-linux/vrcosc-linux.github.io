@@ -1,0 +1,257 @@
+// Shared helpers for the Tier 1 suite. Deliberately small: the thing under test
+// is an installer, so the tests stay close to the shell it runs in.
+//
+// Every `test` block is compiled and run as its own process, so anything a test
+// needs it sets up itself; the helpers here make that cheap. Run the suite from
+// the repository root (`make test`), which is where these paths are resolved.
+import { home, env_or, file_exists, dir_exists, path_exists, echo_err, contains, read_file } from "../../src/util.ab"
+
+// The repository root: the working directory, checked for the files the tests
+// need so a run from the wrong place fails with a reason rather than a mystery.
+pub fun repo_root(): Text {
+    const root = trust $ pwd $
+    if not file_exists("{root}/src/main.ab") {
+        echo_err("tests must be run from the repository root (found no src/main.ab in {root})")
+        exit(2)
+    }
+    return root
+}
+
+// The compiled installer the black-box tests run.
+pub fun install_sh(): Text {
+    const path = "{repo_root()}/install.sh"
+    if not file_exists(path) {
+        echo_err("install.sh is missing; run 'make' first")
+        exit(2)
+    }
+    return path
+}
+
+// Where the compiled fixtures are. They are built by `make fixtures`.
+pub fun fixtures_bin(): Text {
+    const dir = "{repo_root()}/tests/fixtures/bin"
+    if not file_exists("{dir}/make-prefix") {
+        echo_err("compiled fixtures are missing; run 'make fixtures' (or 'make test') first")
+        exit(2)
+    }
+    return dir
+}
+
+// --- assigning shared state ---------------------------------------------------
+// Tests set the installer's globals (VRC_COMPATDATA, DRY_RUN, ...) through these,
+// never with a bare assignment. The optimizer in this Amber release treats a
+// plain assignment to a global as a redeclaration and deletes every earlier
+// assignment to it -- including the ones inside the installer's own functions,
+// so parse_arguments() would stop setting PURGE_MODE the moment a test assigned
+// PURGE_MODE itself. Assignments through a `ref` parameter are exempt.
+
+pub fun set_text(ref target: Text, value: Text): Null {
+    target = value
+}
+
+pub fun set_bool(ref target: Bool, value: Bool): Null {
+    target = value
+}
+
+pub fun set_int(ref target: Int, value: Int): Null {
+    target = value
+}
+
+#[allow_public_mutable]
+pub let CLEANUP_COMMANDS = ""
+
+pub fun register_cleanup(command: Text): Null {
+    set_text(CLEANUP_COMMANDS, "{CLEANUP_COMMANDS}{command}; ")
+    trust $ trap "{CLEANUP_COMMANDS}" EXIT $
+}
+
+// A fresh scratch directory, removed when the test process exits.
+pub fun work_dir(): Text {
+    const dir = trust $ mktemp -d $
+    register_cleanup("rm -rf \"{dir}\"")
+    return dir
+}
+
+// A synthetic compatdata/438100 under root, via the make-prefix fixture. Extra
+// flags are passed through, e.g. make_prefix(root, ["--dotnet", "9.0.14"]).
+pub fun make_prefix(root: Text, flags: [Text] = [Text]): Text {
+    return trust $ "{fixtures_bin()}/make-prefix" --root "{root}" {flags} $
+}
+
+pub fun set_env(name: Text, value: Text): Null {
+    trust $ export "{name}={value}" $
+}
+
+pub fun unset_env(name: Text): Null {
+    trust $ unset "{name}" $
+}
+
+// Points $HOME at a directory of the test's own, so nothing touches the real one.
+pub fun set_home(path: Text): Null {
+    trust $ mkdir -p "{path}" $
+    set_env("HOME", path)
+}
+
+pub fun prepend_path(dir: Text): Null {
+    trust $ export PATH="{dir}:\$PATH" $
+}
+
+// Puts a fixture on PATH under the name the installer looks for.
+pub fun install_fake(bin_dir: Text, fixture: Text, as_name: Text): Null {
+    trust $ mkdir -p "{bin_dir}" $
+    trust $ ln -sf "{fixtures_bin()}/{fixture}" "{bin_dir}/{as_name}" $
+}
+
+// A directory holding a command that only fails, for hiding a real tool from
+// the code under test (a python3 that is not there, a cmp that is not there).
+pub fun stub_missing(bin_dir: Text, name: Text): Null {
+    trust $ mkdir -p "{bin_dir}" $
+    trust $ printf '#!/bin/sh\nexit 127\n' > "{bin_dir}/{name}" $
+    trust $ chmod +x "{bin_dir}/{name}" $
+}
+
+pub fun strip_colors(text: Text): Text {
+    return trust $ printf '%s' "{text}" | sed 's/\x1b\[[0-9;]*m//g' $
+}
+
+pub fun write_file(path: Text, content: Text): Null {
+    trust $ mkdir -p "\$(dirname "{path}")" $
+    trust $ printf '%s' "{content}" > "{path}" $
+}
+
+pub fun sha256_of_text(text: Text): Text {
+    return trust $ printf '%s' "{text}" | sha256sum | awk '\{print \$1}' $
+}
+
+// --- running the compiled installer -------------------------------------------
+
+#[allow_public_mutable]
+pub let LAST_RC = 0
+
+// Runs install.sh in a sealed environment: only the variables given, a PATH of
+// the fake bin directory plus the system one, and no network. Returns combined
+// output; the exit status is in LAST_RC.
+pub fun run_install(fake_bin: Text, home_dir: Text, env_vars: [Text], args: [Text]): Text {
+    const out = trust $ env -i HOME="{home_dir}" PATH="{fake_bin}:/usr/bin:/bin" TERM=dumb {env_vars} bash "{install_sh()}" {args} 2>&1 $
+    set_int(LAST_RC, status())
+    return out
+}
+
+// --- assertions ---------------------------------------------------------------
+// Each one prints a PASS line, or a FAIL line with the details and fails the test.
+
+fun pass(what: Text): Null {
+    echo("  PASS {what}")
+}
+
+fun failure(what: Text, details: [Text]): Null? {
+    echo("  FAIL {what}")
+    for line in details {
+        echo("         {line}")
+    }
+    fail 1
+}
+
+fun head_of(text: Text): Text {
+    return trust $ printf '%s' "{text}" | head -c 400 $
+}
+
+pub fun expect_eq(what: Text, expected: Text, actual: Text): Null? {
+    if expected == actual {
+        pass(what)
+    } else {
+        failure(what, ["expected: [{expected}]", "actual:   [{actual}]"])?
+    }
+}
+
+pub fun expect_true(what: Text, condition: Bool): Null? {
+    if condition {
+        pass(what)
+    } else {
+        failure(what, ["expected the condition to hold"])?
+    }
+}
+
+pub fun expect_false(what: Text, condition: Bool): Null? {
+    expect_true(what, not condition)?
+}
+
+pub fun expect_contains(what: Text, haystack: Text, needle: Text): Null? {
+    if contains(haystack, needle) {
+        pass(what)
+    } else {
+        failure(what, ["expected output to contain: [{needle}]", "got: {head_of(haystack)}"])?
+    }
+}
+
+pub fun expect_not_contains(what: Text, haystack: Text, needle: Text): Null? {
+    if not contains(haystack, needle) {
+        pass(what)
+    } else {
+        failure(what, ["expected output NOT to contain: [{needle}]"])?
+    }
+}
+
+pub fun expect_exists(what: Text, path: Text): Null? {
+    if path_exists(path) {
+        pass(what)
+    } else {
+        failure(what, ["missing path: {path}"])?
+    }
+}
+
+pub fun expect_missing(what: Text, path: Text): Null? {
+    trust $ [ -e "{path}" ] || [ -L "{path}" ] $
+    if status() != 0 {
+        pass(what)
+    } else {
+        failure(what, ["path should not exist: {path}"])?
+    }
+}
+
+pub fun expect_file_eq(what: Text, path: Text, expected: Text): Null? {
+    expect_eq(what, expected, read_file(path))?
+}
+
+// --- capturing output ---------------------------------------------------------
+// Amber has no way to run one of its own functions in a subshell, so to look at
+// what a function printed the test redirects its own stdout and stderr to a file
+// for the duration. Assert after capture_stop(), never in between: a failure
+// reported while captured would land in the file.
+
+#[allow_public_mutable]
+pub let CAPTURE_FILE = ""
+
+pub fun capture_start(): Null {
+    set_text(CAPTURE_FILE, trust $ mktemp $)
+    trust $ exec 7>&1 8>&2 1>"{CAPTURE_FILE}" 2>&1 $
+}
+
+pub fun capture_stop(): Text {
+    trust $ exec 1>&7 2>&8 7>&- 8>&- $
+    const out = read_file(CAPTURE_FILE)
+    trust $ rm -f "{CAPTURE_FILE}" $
+    return out
+}
+
+// --- background stand-ins -----------------------------------------------------
+// A process whose /proc/<pid>/comm and environment look like a wine session
+// owner: a copy of sleep under the wanted name, started with exactly the given
+// environment. Killed when the test process exits.
+
+pub fun start_named_process(work: Text, name: Text, env_pairs: [Text]): Text {
+    const exe = "{work}/{name}"
+    trust $ cp /bin/sleep "{exe}" $
+    const proc_pid = trust $ env -i {env_pairs} PATH=/usr/bin:/bin "{exe}" 300 >/dev/null 2>&1 & echo \$! $
+    register_cleanup("kill {proc_pid} 2>/dev/null")
+    // Wait for /proc/<pid>/environ to be readable before asserting on it.
+    trust $ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+        grep -qz . "/proc/{proc_pid}/environ" 2>/dev/null && break
+        sleep 0.2
+    done $
+    return proc_pid
+}
+
+pub fun stop_process(proc_pid: Text): Null {
+    trust $ kill "{proc_pid}" 2>/dev/null; wait "{proc_pid}" 2>/dev/null $
+}

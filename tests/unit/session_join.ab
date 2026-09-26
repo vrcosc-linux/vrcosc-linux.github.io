@@ -1,0 +1,94 @@
+// The launcher must run VRCOSC inside VRChat's Steam container when the game is
+// running: that is the only arrangement in which VRCOSC shares VRChat's wine
+// session and can see its process, pipes and windows. Measured on a live system
+// (docs/prefix-session-findings.md); reproduced here with stand-ins.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, DRY_RUN, RESOLVED_RUNTIME_MODE } from "../../src/state.ab"
+import { create_launchers } from "../../src/launcher.ab"
+import { get_launcher_script } from "../../src/paths.ab"
+import { get_prefix_proton_dir, find_vrchat_container_pid, write_session_env_file } from "../../src/runtime.ab"
+import { read_file } from "../../src/util.ab"
+
+const WORK = work_dir()
+const BIN = "{WORK}/bin"
+set_home("{WORK}/home")
+install_fake(BIN, "fake-protontricks", "protontricks")
+install_fake(BIN, "fake-nsenter", "nsenter")
+set_text(VRC_COMPATDATA, make_prefix("{WORK}/steam", ["--dotnet", "10.0.1", "--tfm", "net10.0"]))
+set_text(RESOLVED_RUNTIME_MODE, "no-bwrap")
+
+// A fake Proton wine inside the fixture's Proton build that logs what it ran.
+// The launcher runs wine under `env -i` with VRChat's environment, so the log
+// path has to be baked in rather than inherited.
+const PROTON_DIR = get_prefix_proton_dir()
+const WINE_LOG = "{WORK}/wine.log"
+trust $ mkdir -p "{PROTON_DIR}/files/bin" $
+trust $ cat > "{PROTON_DIR}/files/bin/wine" <<W
+#!/usr/bin/env bash
+\{ echo "WINE-ARGS: \\\$*"; env | grep -E '^(WINEPREFIX|WINEESYNC|MARKER_FROM_VRCHAT|WINEDEBUG)=' | sort; } >> "{WINE_LOG}"
+W
+$
+trust $ chmod +x "{PROTON_DIR}/files/bin/wine" $
+
+capture_start()
+create_launchers() failed {}
+capture_stop()
+const LAUNCHER = get_launcher_script()
+const PT_LOG = "{WORK}/pt.log"
+const NS_LOG = "{WORK}/ns.log"
+const STDERR = "{WORK}/stderr"
+
+fun run_launcher(env_vars: [Text], args: [Text]): Null {
+    trust $ : > "{PT_LOG}"; : > "{NS_LOG}"; : > "{WINE_LOG}" $
+    trust $ env PATH="{BIN}:/usr/bin:/bin" FAKE_PT_LOG="{PT_LOG}" FAKE_NSENTER_LOG="{NS_LOG}" {env_vars} bash "{LAUNCHER}" {args} >/dev/null 2>"{STDERR}" $
+}
+
+// Stand-in for the game: a process named VRChat.exe carrying Proton's markers.
+fun start_vrchat(): Text {
+    return start_named_process(WORK, "VRChat.exe", ["WINEPREFIX={VRC_COMPATDATA}/pfx/", "PRESSURE_VESSEL_RUNTIME=steamrt4", "WINEESYNC=1", "MARKER_FROM_VRCHAT=yes", "WINELOADERNOEXEC=1", "not-an-identifier=1"])
+}
+
+test "with VRChat not running, the launcher falls back to protontricks" {
+    run_launcher([Text], [Text])
+    expect_contains("protontricks runs VRCOSC", read_file(PT_LOG), "VRCOSC.dll")?
+    expect_contains("and says to start VRChat first for detection", read_file(STDERR), "start VRChat first")?
+    expect_eq("and does not try to enter any namespace", "", read_file(NS_LOG))?
+}
+
+test "find_vrchat_container_pid() finds a VRChat.exe running in a Steam container for this prefix" {
+    const vrc_pid = start_vrchat()
+    expect_eq("pid found", vrc_pid, find_vrchat_container_pid())?
+}
+
+test "write_session_env_file() keeps Proton's settings and drops loader state and bad keys" {
+    const vrc_pid = start_vrchat()
+    write_session_env_file(vrc_pid, "{WORK}/env.sh")
+    const env_file = read_file("{WORK}/env.sh")
+    expect_contains("keeps WINEESYNC", env_file, "export WINEESYNC=1")?
+    expect_not_contains("drops WINELOADERNOEXEC", env_file, "WINELOADERNOEXEC")?
+    expect_not_contains("drops a key that is not an identifier", env_file, "not-an-identifier")?
+    trust silent $ bash -n "{WORK}/env.sh" $
+    expect_eq("and the env file is valid shell", "0", "{status()}")?
+}
+
+test "with VRChat running, the launcher enters its namespaces" {
+    const vrc_pid = start_vrchat()
+    run_launcher([Text], ["--some-arg"])
+    expect_contains("enters the game's namespaces", read_file(NS_LOG), "-t {vrc_pid} -U -m --preserve-credentials")?
+    expect_contains("and runs Proton's wine with dotnet and VRCOSC.dll inside", read_file(WINE_LOG), "WINE-ARGS: C:/Program Files/dotnet/dotnet.exe C:/users/steamuser/AppData/Local/VRCOSC/VRCOSC.dll --some-arg")?
+    expect_contains("with VRChat's own environment", read_file(WINE_LOG), "MARKER_FROM_VRCHAT=yes")?
+    expect_eq("and does not go through protontricks at all", "", read_file(PT_LOG))?
+    expect_contains("and tells the user which session it joined", read_file(STDERR), "joining VRChat's wine session (pid {vrc_pid})")?
+}
+
+test "VRCOSC_JOIN=0 forces the standalone path even with VRChat running" {
+    start_vrchat()
+    run_launcher(["VRCOSC_JOIN=0"], [Text])
+    expect_eq("no namespace entered", "", read_file(NS_LOG))?
+    expect_contains("and protontricks runs it instead", read_file(PT_LOG), "VRCOSC.dll")?
+}
+
+test "a VRChat.exe outside any Steam container is not joined" {
+    start_named_process(WORK, "VRChat.exe", ["WINEPREFIX={VRC_COMPATDATA}/pfx/"])
+    expect_eq("not found", "", find_vrchat_container_pid())?
+}

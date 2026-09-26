@@ -1,0 +1,49 @@
+// The .NET channel VRCOSC needs must come from its runtimeconfig.json, since
+// rollForward does not cross major versions and a mismatch presents to the user
+// as "no runtime installed" despite dotnet.exe being right there.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA } from "../../src/state.ab"
+import { get_required_dotnet_channel, has_desktop_runtime_channel, get_installed_desktop_runtimes } from "../../src/dotnet.ab"
+import { join_words } from "../../src/util.ab"
+
+const WORK = work_dir()
+
+fun with_prefix(name: Text, flags: [Text]): Null {
+    set_text(VRC_COMPATDATA, make_prefix("{WORK}/{name}", flags))
+}
+
+test "reads the channel from a net9.0 runtimeconfig" {
+    with_prefix("net9", ["--tfm", "net9.0-windows"])
+    expect_eq("9.0", "9.0", get_required_dotnet_channel())?
+}
+
+test "reads the channel from a net10.0 runtimeconfig" {
+    with_prefix("net10", ["--tfm", "net10.0-windows"])
+    expect_eq("10.0", "10.0", get_required_dotnet_channel())?
+}
+
+test "falls back to tfm when no WindowsDesktop framework is listed" {
+    with_prefix("tfmonly", ["--tfm", "net8.0-windows", "--no-frameworks"])
+    expect_eq("8.0", "8.0", get_required_dotnet_channel())?
+}
+
+test "fails cleanly when runtimeconfig.json is absent" {
+    with_prefix("novrcosc", ["--no-vrcosc"])
+    expect_eq("empty channel", "", get_required_dotnet_channel())?
+}
+
+test "sees a matching installed runtime as satisfying the channel" {
+    with_prefix("ok", ["--tfm", "net9.0-windows", "--dotnet", "9.0.14"])
+    expect_true("9.0 satisfied", has_desktop_runtime_channel("9.0"))?
+}
+
+test "does not accept a different major version as satisfying the channel" {
+    with_prefix("wrongmajor", ["--tfm", "net9.0-windows", "--dotnet", "10.0.7"])
+    expect_false("9.0 not satisfied by 10.0.7", has_desktop_runtime_channel("9.0"))?
+}
+
+test "reports every installed WindowsDesktop runtime" {
+    with_prefix("multi", ["--dotnet", "8.0.27,9.0.16,10.0.8"])
+    const listed = trust $ printf '%s\n' {get_installed_desktop_runtimes()} | sort -V | tr '\n' ' ' | sed 's/ \$//' $
+    expect_eq("all three", "8.0.27 9.0.16 10.0.8", listed)?
+}

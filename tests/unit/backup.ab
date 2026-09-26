@@ -1,0 +1,60 @@
+// --backup exists to be correct immediately before something destructive, so the
+// failure that matters is a backup that looks fine and contains nothing.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, DRY_RUN } from "../../src/state.ab"
+import { create_backup } from "../../src/backup.ab"
+import { glob, contains } from "../../src/util.ab"
+import { ends_with } from "std/text"
+
+const WORK = work_dir()
+set_home("{WORK}/home")
+trust $ mkdir -p "{WORK}/home/Desktop" $
+set_text(VRC_COMPATDATA, make_prefix("{WORK}/steam"))
+const USERS = "{VRC_COMPATDATA}/pfx/drive_c/users"
+
+// The config lives outside the prefix and is reached through a symlink, which is
+// what cloud-synced setups look like.
+const REAL_CONFIG = "{WORK}/cloud/VRCOSC"
+trust $ mkdir -p "{REAL_CONFIG}/configuration" "{REAL_CONFIG}/profiles" "{REAL_CONFIG}/logs" "{REAL_CONFIG}/runtime" $
+write_file("{REAL_CONFIG}/configuration/settings.json", "\{\"setting\":\"value\"}\n")
+write_file("{REAL_CONFIG}/profiles/default.json", "\{\"profile\":\"default\"}\n")
+trust $ head -c 200000 /dev/zero > "{REAL_CONFIG}/logs/big.log" $
+trust $ head -c 200000 /dev/zero > "{REAL_CONFIG}/runtime/cache.bin" $
+trust $ mkdir -p "{USERS}/steamuser/AppData/Roaming" $
+trust $ ln -sfn "{REAL_CONFIG}" "{USERS}/steamuser/AppData/Roaming/VRCOSC" $
+
+fun run_backup(): Text {
+    capture_start()
+    create_backup() failed {}
+    return capture_stop()
+}
+
+fun archive_path(): Text {
+    const found = glob("{WORK}/home/Desktop/VRCOSC_backup_*")
+    if len(found) == 0 {
+        return ""
+    }
+    return found[0]
+}
+
+fun listing(archive: Text): Text {
+    if ends_with(archive, ".7z") {
+        return trust $ 7z l "{archive}" -ba 2>/dev/null $
+    }
+    return trust $ tar -tf "{archive}" 2>/dev/null $
+}
+
+test "a backup holds the settings and profiles, not the caches" {
+    const out = run_backup()
+    const archive = archive_path()
+    expect_true("produces an archive", archive != "")?
+    const contents = listing(archive)
+    expect_contains("backs up the settings behind the symlink, not the symlink", contents, "configuration/settings.json")?
+    expect_contains("backs up profiles too", contents, "profiles/default.json")?
+    expect_not_contains("leaves out the regenerated runtime cache", contents, "runtime/cache.bin")?
+    expect_not_contains("leaves out logs", contents, "big.log")?
+    expect_contains("says which directories it skipped", out, "regenerated cache")?
+    expect_contains("includes the prefix registries", contents, "user.reg")?
+    const size = trust $ stat -c%s "{archive}" $
+    expect_true("the archive is big enough to actually hold the config", trust $ [ "{size}" -gt 200 ] && echo yes || echo no $ == "yes")?
+}

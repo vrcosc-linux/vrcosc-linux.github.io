@@ -1,0 +1,217 @@
+// Release channel settings.
+//
+// Only the install directory is per-channel; settings, profiles and package
+// records are shared (AppManager.APP_NAME is "VRCOSC" for every Release build).
+// So installing the other channel hands the new app the old one's state, and
+// three parts of that state are wrong for it. See docs/channel-switching.md.
+import { VRCOSC_BRANCH, DRY_RUN } from "state.ab"
+import { log_info, log_success, log_warn } from "log.ab"
+import { have_cmd, file_exists, dirname, mkdir_p, nonempty_lines } from "util.ab"
+import { get_vrcosc_config_dirs } from "paths.ab"
+import { vrcosc_is_running } from "runtime.ab"
+
+// UpdateChannel as VRCOSC's enum stores it (VRCOSC.App/Updater/UpdateChannel.cs).
+pub fun channel_value_for_branch(branch: Text = ""): Int {
+    let b = branch
+    if b == "" {
+        b = VRCOSC_BRANCH
+    }
+    if b == "beta" {
+        return 1
+    }
+    return 0
+}
+
+// The channel the existing settings claim, or empty when there is no settings
+// file yet -- which is a first install, not a switch.
+pub fun read_configured_channel(cfg: Text): Text {
+    if not file_exists(cfg) {
+        return ""
+    }
+
+    if have_cmd("python3") {
+        const parsed = trust $ \{ python3 - "{cfg}" <<'PY' 2>/dev/null
+import json, sys
+with open(sys.argv[1]) as fh:
+    v = json.load(fh).get("settings", \{}).get("UpdateChannel")
+if isinstance(v, bool) or not isinstance(v, int):
+    sys.exit(1)
+print(v)
+PY
+        } $
+        if status() == 0 {
+            return parsed
+        }
+    }
+
+    return trust $ grep -oE '"UpdateChannel"[[:space:]]*:[[:space:]]*[0-9]+' "{cfg}" 2>/dev/null | head -n 1 | grep -oE '[0-9]+\$' $
+}
+
+// Writes UpdateChannel, and AllowPreReleasePackages when a value is given.
+// VRCOSC merges the file over its defaults, so a file carrying only these keys
+// is enough -- but `version` must match or the app ignores the file entirely.
+pub fun write_channel_settings(cfg: Text, channel: Int, prerelease: Text): Bool {
+    mkdir_p(dirname(cfg))
+
+    if not file_exists(cfg) {
+        if prerelease != "" {
+            trust $ printf '\{\n  "settings": \{\n    "UpdateChannel": %s,\n    "AllowPreReleasePackages": %s\n  },\n  "metadata": \{},\n  "version": 1\n}\n' "{channel}" "{prerelease}" > "{cfg}" $
+        } else {
+            trust $ printf '\{\n  "settings": \{\n    "UpdateChannel": %s\n  },\n  "metadata": \{},\n  "version": 1\n}\n' "{channel}" > "{cfg}" $
+        }
+        return status() == 0
+    }
+
+    if have_cmd("python3") {
+        trust $ \{ python3 - "{cfg}" "{channel}" "{prerelease}" <<'PY'
+import json, sys
+path, channel, prerelease = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+with open(path) as fh:
+    doc = json.load(fh)
+settings = doc.setdefault("settings", \{})
+settings["UpdateChannel"] = channel
+if prerelease:
+    settings["AllowPreReleasePackages"] = prerelease == "true"
+with open(path, "w") as fh:
+    json.dump(doc, fh, indent=2)
+PY
+        } >/dev/null 2>&1 $
+        if status() == 0 {
+            return true
+        }
+    }
+
+    // Without python3 the keys can only be edited where they already exist.
+    let edited = false
+    trust silent $ grep -q '"UpdateChannel"' "{cfg}" $
+    if status() == 0 {
+        trust $ sed -i "s/\"UpdateChannel\"[[:space:]]*:[[:space:]]*[0-9]*/\"UpdateChannel\": {channel}/" "{cfg}" $
+        edited = true
+    }
+    if prerelease != "" {
+        trust silent $ grep -q '"AllowPreReleasePackages"' "{cfg}" $
+        if status() == 0 {
+            trust $ sed -i "s/\"AllowPreReleasePackages\"[[:space:]]*:[[:space:]]*\(true\|false\)/\"AllowPreReleasePackages\": {prerelease}/" "{cfg}" $
+            edited = true
+        }
+    }
+    return edited
+}
+
+// A package's recorded version belongs to the SDK line of the channel that
+// installed it, so after a switch packages.json reports modules as installed
+// whose DLLs will not load. Deleting it forces a clean re-resolve; the names are
+// printed first because that list is the only record of what to reinstall.
+pub fun invalidate_package_cache(dir: Text): Null {
+    const packages = "{dir}/configuration/packages.json"
+    if not file_exists(packages) {
+        return null
+    }
+
+    // The file's shape, read off a real one rather than assumed:
+    //   {"installed": [{"package_id": "...", "version": "..."}], "cache": [...],
+    //    "cache_expire_time": "...", "version": 1}
+    // Only "installed" is what the user actually has; "cache" is the remote
+    // catalogue, which is not what anyone needs to reinstall.
+    let names = ""
+    if have_cmd("python3") {
+        names = trust $ \{ python3 - "{packages}" <<'PYPKG' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1]) as fh:
+    doc = json.load(fh)
+if isinstance(doc, dict):
+    for entry in doc.get("installed") or []:
+        if isinstance(entry, dict) and entry.get("package_id"):
+            print(entry["package_id"], entry.get("version", ""))
+        elif isinstance(entry, str):
+            print(entry)
+PYPKG
+        } $
+    }
+
+    // Fall back to grep whenever that produced nothing -- python3 missing, python3
+    // present but broken, or a file shaped differently than expected. This list is
+    // the only record of what to reinstall and it is about to be deleted, so it is
+    // worth a second attempt rather than a condition on why the first one failed.
+    if names == "" {
+        names = trust $ grep -o '"package_id"[[:space:]]*:[[:space:]]*"[^"]*"' "{packages}" 2>/dev/null | sed 's/.*"\([^"]*\)"\$/\1/' $
+    }
+
+    if DRY_RUN {
+        log_info("Would delete {packages} (channel changed)")
+        return null
+    }
+
+    if names != "" {
+        log_warn("These packages were installed for the other channel and must be")
+        log_warn("reinstalled from the Packages tab:")
+        for line in nonempty_lines(names) {
+            echo("  * {line}")
+        }
+    }
+
+    trust $ rm -f "{packages}" $
+    log_success("Cleared the package cache so it re-resolves for this channel.")
+}
+
+// Brings the shared settings in line with the branch being installed.
+pub fun apply_channel_settings(): Null {
+    const dirs = get_vrcosc_config_dirs()
+    const channel = channel_value_for_branch(VRCOSC_BRANCH)
+
+    if vrcosc_is_running() {
+        log_warn("VRCOSC is running; it rewrites its settings on exit, so anything")
+        log_warn("written now would be discarded. Close it and run the installer again")
+        log_warn("to have the update channel set for you, or set it yourself in Settings.")
+        return null
+    }
+
+    if len(dirs) == 0 {
+        if VRCOSC_BRANCH == "beta" {
+            log_warn("No settings file yet; enable 'Allow Pre-Release Packages' and set the")
+            log_warn("update channel to Beta in VRCOSC's settings after its first run.")
+        }
+        return null
+    }
+
+    for d in dirs {
+        const cfg = "{d}/configuration/settings.json"
+        const previous = read_configured_channel(cfg)
+
+        const switched = previous != "" and previous != "{channel}"
+
+        // Beta needs pre-releases visible, since every module built against a beta
+        // SDK ships as one. Live only has them forced off when switching back from
+        // beta: on a plain live install the setting may have been turned on
+        // deliberately, and overriding that on every run is not ours to do.
+        let prerelease = ""
+        if {
+            VRCOSC_BRANCH == "beta": prerelease = "true"
+            switched: prerelease = "false"
+        }
+
+        if {
+            DRY_RUN {
+                log_info("Would set update channel to {VRCOSC_BRANCH} in {cfg}")
+                if prerelease != "" {
+                    log_info("Would set pre-release packages to {prerelease} in {cfg}")
+                }
+            }
+            write_channel_settings(cfg, channel, prerelease) {
+                log_success("Update channel set to {VRCOSC_BRANCH} ({cfg}).")
+                if {
+                    prerelease == "true": log_success("Enabled pre-release packages for beta ({cfg}).")
+                    prerelease == "false": log_success("Disabled pre-release packages for live ({cfg}).")
+                }
+            }
+            else {
+                log_warn("Could not edit {cfg}; set 'Update Channel' to {VRCOSC_BRANCH} in VRCOSC's settings.")
+            }
+        }
+
+        if switched {
+            log_warn("Channel changed; the installed packages belong to the other channel.")
+            invalidate_package_cache(d)
+        }
+    }
+}

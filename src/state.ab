@@ -1,0 +1,41 @@
+// The installer's run-time state: what the command line asked for and what was
+// discovered along the way. Configured solely via command-line arguments in
+// normal use; tests set these directly to exercise single functions.
+import { SHIPPED_LAUNCH_BRIDGE_SHA256 } from "constants.ab"
+
+#[allow_public_mutable]
+pub let VRCOSC_BRANCH = "live" // live or beta
+#[allow_public_mutable]
+pub let FORCE_INSTALL = false
+#[allow_public_mutable]
+pub let UNINSTALL_MODE = false
+#[allow_public_mutable]
+pub let BACKUP_MODE = false
+#[allow_public_mutable]
+pub let INFO_MODE = false
+#[allow_public_mutable]
+pub let DRY_RUN = false
+#[allow_public_mutable]
+pub let NO_FIREWALL = false
+#[allow_public_mutable]
+pub let PATCH_LAUNCH = true // patching VRChat's launch.exe; refuse it with --no-patch
+#[allow_public_mutable]
+pub let PURGE_MODE = false // delete settings and profiles as well; see --purge
+#[allow_public_mutable]
+pub let VRC_COMPATDATA = ""
+#[allow_public_mutable]
+pub let RUNTIME_MODE = "auto" // auto | no-bwrap | host | container
+#[allow_public_mutable]
+pub let RESOLVED_RUNTIME_MODE = "" // filled in by probe_runtime_mode()
+
+// The digest a bridge payload must have to count as current. Starts as the
+// shipped pin; tests point it at their own fake payload.
+#[allow_public_mutable]
+pub let LAUNCH_BRIDGE_SHA256 = SHIPPED_LAUNCH_BRIDGE_SHA256
+
+// The file this script was loaded from, or empty when there is no script file --
+// which is the normal case for the documented `curl ... | bash` install, where
+// nothing useful is in BASH_SOURCE and a naive dirname silently yields the
+// caller's cwd. Recorded once at start-up; tests set it to simulate either case.
+#[allow_public_mutable]
+pub let SCRIPT_SOURCE = trust $ printf '%s' "\$\{BASH_SOURCE[0]:-}" $

@@ -1,0 +1,89 @@
+// The regression that broke a tester's install: wine invoked with Steam Runtime
+// variables leaked in from the calling shell, producing bogus fontconfig
+// "out of memory" errors and an install that completes but never runs.
+import * from "../lib/harness.ab"
+import { VRC_COMPATDATA, RUNTIME_MODE, RESOLVED_RUNTIME_MODE, DRY_RUN } from "../../src/state.ab"
+import { runtime_mode_flags, list_contaminated_env, run_in_prefix, prefix_output_is_broken, probe_runtime_mode } from "../../src/runtime.ab"
+import { read_file, join_words } from "../../src/util.ab"
+
+const WORK = work_dir()
+set_text(VRC_COMPATDATA, make_prefix("{WORK}/lib", ["--dotnet", "9.0.14"]))
+install_fake("{WORK}/bin", "fake-protontricks", "protontricks")
+prepend_path("{WORK}/bin")
+const PT_LOG = "{WORK}/pt.log"
+set_env("FAKE_PT_LOG", PT_LOG)
+
+fun wine_version_in(mode: Text): Null {
+    trust $ : > "{PT_LOG}" $
+    set_text(RESOLVED_RUNTIME_MODE, mode)
+    run_in_prefix("wine --version") failed {}
+}
+
+fun probe_with(profile: Text): Null {
+    set_env("FAKE_PT_PROFILE", profile)
+    set_text(RUNTIME_MODE, "auto")
+    set_bool(DRY_RUN, false)
+    capture_start()
+    probe_runtime_mode()
+    capture_stop()
+}
+
+test "maps each runtime mode onto the right protontricks flags" {
+    expect_eq("no-bwrap", "--no-bwrap", runtime_mode_flags("no-bwrap"))?
+    expect_eq("maps host mode to --no-runtime", "--no-runtime", runtime_mode_flags("host"))?
+    expect_eq("maps container mode to no flags", "", runtime_mode_flags("container"))?
+}
+
+test "lists leaked Steam Runtime variables" {
+    set_env("LD_LIBRARY_PATH", "/runtime/lib")
+    set_env("FONTCONFIG_PATH", "/runtime/etc/fonts")
+    const leaked = join_words(list_contaminated_env())
+    expect_contains("lists LD_LIBRARY_PATH", leaked, "LD_LIBRARY_PATH")?
+    expect_contains("lists FONTCONFIG_PATH as leaked too", leaked, "FONTCONFIG_PATH")?
+}
+
+test "scrubs leaked variables out of the wine call" {
+    set_env("LD_LIBRARY_PATH", "/runtime/lib")
+    set_env("FONTCONFIG_PATH", "/runtime/etc/fonts")
+    set_env("WINEPREFIX", "/some/other/prefix")
+    wine_version_in("no-bwrap")
+    const log = read_file(PT_LOG)
+    expect_not_contains("scrubs LD_LIBRARY_PATH", log, "ENV: LD_LIBRARY_PATH")?
+    expect_not_contains("scrubs FONTCONFIG_PATH out of the wine call", log, "ENV: FONTCONFIG_PATH")?
+    expect_not_contains("scrubs a hijacking WINEPREFIX out of the wine call", log, "ENV: WINEPREFIX")?
+}
+
+test "passes the mode's flags through to protontricks" {
+    wine_version_in("host")
+    expect_contains("--no-runtime", read_file(PT_LOG), "--no-runtime")?
+}
+
+test "detects a broken environment from fontconfig noise" {
+    expect_true("fontconfig noise is broken", prefix_output_is_broken("Fontconfig error: \"/etc/fonts/fonts.conf\", line 86: out of memory"))?
+    expect_false("does not call a runtime-not-recognized warning alone a broken environment", prefix_output_is_broken("protontricks (WARNING): Current Steam Runtime not recognized by Protontricks."))?
+}
+
+test "auto-probe picks the only working mode on a fontconfig-mismatched host" {
+    probe_with("fontconfig-mismatch")
+    expect_eq("host", "host", RESOLVED_RUNTIME_MODE)?
+}
+
+test "auto-probe prefers no-bwrap when the host is healthy" {
+    probe_with("clean")
+    expect_eq("no-bwrap", "no-bwrap", RESOLVED_RUNTIME_MODE)?
+}
+
+test "auto-probe falls past container mode when bwrap nesting fails" {
+    probe_with("bwrap-broken")
+    expect_eq("no-bwrap", "no-bwrap", RESOLVED_RUNTIME_MODE)?
+}
+
+test "an explicit --runtime is honoured without probing" {
+    trust $ : > "{PT_LOG}" $
+    set_text(RUNTIME_MODE, "container")
+    capture_start()
+    probe_runtime_mode()
+    capture_stop()
+    expect_eq("resolved to container", "container", RESOLVED_RUNTIME_MODE)?
+    expect_eq("and protontricks was never called", "", read_file(PT_LOG))?
+}

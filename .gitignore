@@ -10,3 +10,6 @@ __pycache__/
 
 # Bridge build output
 bin/obj/
+
+# Compiled test fixtures; `make fixtures` regenerates them
+/tests/fixtures/bin/

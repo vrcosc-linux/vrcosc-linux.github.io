@@ -1,0 +1,60 @@
+// Stand-in for curl, so nothing in the tests touches the network. What it hands
+// back is chosen with environment variables:
+//
+//   FAKE_CURL_BODY          the response body (default: empty)
+//   FAKE_CURL_STATUS        the exit status (default: 0)
+//   FAKE_CURL_MATCH         a substring; URLs containing it get the *_MATCH_* pair
+//   FAKE_CURL_MATCH_BODY    the body for matching URLs
+//   FAKE_CURL_MATCH_STATUS  the exit status for matching URLs (default: 0)
+//   FAKE_CURL_LOG           every requested URL is appended here
+//
+// The body is written to the -o file when there is one, else to stdout, without a
+// trailing newline -- the same bytes a real download would leave behind.
+import { env_or, contains } from "../../src/util.ab"
+import { starts_with } from "std/text"
+import { parse_int } from "std/text"
+
+main(args) {
+    const argv = args[1..len(args)]
+    let out = ""
+    let url = ""
+    let i = 0
+    while i < len(argv) {
+        const arg = argv[i]
+        if {
+            arg == "-o" {
+                out = argv[i + 1]
+                i += 1
+            }
+            starts_with(arg, "http"): url = arg
+        }
+        i += 1
+    }
+
+    const log = env_or("FAKE_CURL_LOG", "")
+    if log != "" {
+        trust $ printf '%s\n' "{url}" >> "{log}" $
+    }
+
+    let body = env_or("FAKE_CURL_BODY", "")
+    let rc_text = env_or("FAKE_CURL_STATUS", "0")
+    const match = env_or("FAKE_CURL_MATCH", "")
+    if match != "" and contains(url, match) {
+        body = env_or("FAKE_CURL_MATCH_BODY", "")
+        rc_text = env_or("FAKE_CURL_MATCH_STATUS", "0")
+    }
+    const rc = parse_int(rc_text) failed {
+        echo("fake-curl: FAKE_CURL_STATUS must be a number")
+        exit(2)
+    }
+
+    if rc != 0 {
+        exit(rc)
+    }
+    if out != "" {
+        trust $ printf '%s' "{body}" > "{out}" $
+    } else {
+        trust $ printf '%s' "{body}" $
+    }
+    exit(0)
+}

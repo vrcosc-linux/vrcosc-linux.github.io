@@ -1,0 +1,174 @@
+// The .NET Desktop Runtime VRCOSC needs, and getting it into the prefix.
+import { YELLOW, CYAN, NC, DEFAULT_DOTNET_CHANNEL } from "constants.ab"
+import { VRC_COMPATDATA, DRY_RUN, FORCE_INSTALL } from "state.ab"
+import { log_info, log_success, log_warn, log_error } from "log.ab"
+import { have_cmd, file_exists, dir_exists, glob, basename, join_words } from "util.ab"
+import { get_vrcosc_install_dir } from "paths.ab"
+import { run_in_prefix } from "runtime.ab"
+import { starts_with } from "std/text"
+
+// Reads the .NET runtime band VRCOSC actually asks for out of its
+// runtimeconfig.json, as a "<major>.<minor>" channel. .NET's default rollForward
+// policy does not cross major versions, so installing the wrong major (10.0 for
+// a net9.0 build, say) leaves VRCOSC reporting that no runtime is installed even
+// though dotnet.exe sits right there in the same prefix. Empty when unreadable.
+pub fun get_required_dotnet_channel(dir: Text = ""): Text {
+    let d = dir
+    if d == "" {
+        d = get_vrcosc_install_dir()
+    }
+    const cfg = "{d}/VRCOSC.runtimeconfig.json"
+    if not file_exists(cfg) {
+        return ""
+    }
+
+    let channel = ""
+    if have_cmd("python3") {
+        channel = trust $ \{ python3 - "{cfg}" <<'PY' 2>/dev/null || true
+import json, re, sys
+
+with open(sys.argv[1]) as fh:
+    opts = json.load(fh).get("runtimeOptions", \{})
+
+frameworks = opts.get("frameworks", [])
+if "framework" in opts:
+    frameworks = [opts["framework"]] + list(frameworks)
+
+for fw in frameworks:
+    if fw.get("name") == "Microsoft.WindowsDesktop.App" and fw.get("version"):
+        print(".".join(fw["version"].split(".")[:2]))
+        break
+else:
+    match = re.match(r"net(\d+\.\d+)", opts.get("tfm", ""))
+    if match:
+        print(match.group(1))
+PY
+        } $
+    }
+
+    // Fallback for hosts without python3: first version-looking field wins.
+    if channel == "" {
+        channel = trust $ grep -oE '"version"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+' "{cfg}" | head -n 1 | grep -oE '[0-9]+\.[0-9]+\$' $
+    }
+    if channel == "" {
+        channel = trust $ grep -oE '"tfm"[[:space:]]*:[[:space:]]*"net[0-9]+\.[0-9]+' "{cfg}" | head -n 1 | grep -oE '[0-9]+\.[0-9]+\$' $
+    }
+
+    return channel
+}
+
+fun desktop_runtime_dir(): Text {
+    return "{VRC_COMPATDATA}/pfx/drive_c/Program Files/dotnet/shared/Microsoft.WindowsDesktop.App"
+}
+
+// Lists the Microsoft.WindowsDesktop.App versions present in the prefix.
+pub fun get_installed_desktop_runtimes(): [Text] {
+    let versions = [Text]
+    const shared_dir = desktop_runtime_dir()
+    if not dir_exists(shared_dir) {
+        return versions
+    }
+    for d in glob("{shared_dir}/*") {
+        if dir_exists(d) {
+            versions += [basename(d)]
+        }
+    }
+    return versions
+}
+
+// True when a runtime matching the requested "<major>.<minor>" channel is present.
+pub fun has_desktop_runtime_channel(channel: Text): Bool {
+    for installed in get_installed_desktop_runtimes() {
+        if starts_with(installed, "{channel}.") {
+            return true
+        }
+    }
+    return false
+}
+
+// Fails loudly when the runtime VRCOSC needs is not actually in the prefix after
+// installing. Silently proceeding here is what produced "installed fine but
+// VRCOSC says there is no runtime" reports.
+pub fun verify_dotnet_runtime(channel: Text): Null {
+    let installed = join_words(get_installed_desktop_runtimes())
+
+    if not has_desktop_runtime_channel(channel) {
+        if installed == "" {
+            installed = "none"
+        }
+        log_error("Error: .NET {channel} Desktop Runtime is missing from the prefix after installation.")
+        echo("  * Expected: {CYAN}Microsoft.WindowsDesktop.App {channel}.x{NC}")
+        echo("  * Present:  {YELLOW}{installed}{NC}")
+        echo("{YELLOW}The installer ran but wrote nothing usable. This is normally a broken wine{NC}")
+        echo("{YELLOW}environment -- try re-running with {CYAN}--runtime host{YELLOW} or {CYAN}--runtime container{YELLOW}.{NC}")
+        exit(1)
+    }
+
+    log_success(".NET Desktop Runtime verified in prefix: {installed}")
+}
+
+pub fun install_dotnet_runtime(): Null? {
+    let channel = get_required_dotnet_channel()
+    if channel != "" {
+        log_info("VRCOSC requires the .NET {channel} Desktop Runtime (from VRCOSC.runtimeconfig.json).")
+    } else {
+        channel = DEFAULT_DOTNET_CHANNEL
+        log_warn("Could not read the required runtime from VRCOSC.runtimeconfig.json; assuming .NET {channel}.")
+    }
+
+    const installed_dotnet = "{VRC_COMPATDATA}/pfx/drive_c/Program Files/dotnet/dotnet.exe"
+    if file_exists(installed_dotnet) and has_desktop_runtime_channel(channel) and not FORCE_INSTALL {
+        log_success(".NET {channel} Desktop Runtime already present in prefix. Skipping download (use -f/--force to reinstall).")
+        return null
+    }
+
+    if file_exists(installed_dotnet) and not has_desktop_runtime_channel(channel) {
+        let present = join_words(get_installed_desktop_runtimes())
+        if present == "" {
+            present = "none"
+        }
+        log_warn("Prefix has .NET Desktop Runtime(s) [{present}] but VRCOSC needs {channel}.x -- installing it alongside.")
+    }
+
+    log_info("Fetching latest .NET {channel} Desktop Runtime download URL...")
+    // builds.dotnet.microsoft.com is the host Microsoft's January 2025 notice moved
+    // this metadata to; the blob host still answers, so it stays as a fallback
+    // rather than being the only way in.
+    let releases_json = ""
+    for meta_host in ["builds.dotnet.microsoft.com", "dotnetcli.blob.core.windows.net"] {
+        releases_json = trust $ curl -fsS --connect-timeout 10 "https://{meta_host}/dotnet/release-metadata/{channel}/releases.json" 2>/dev/null $
+        if releases_json != "" {
+            break
+        }
+    }
+    const dotnet_url = trust $ grep -o 'https://[^"]*windowsdesktop-runtime-[0-9.]*-win-x64.exe' <<< "{releases_json}" | head -n 1 $
+
+    if dotnet_url == "" {
+        if DRY_RUN {
+            log_warn("Dry run: could not reach the .NET release metadata; skipping runtime install.")
+            return null
+        }
+        log_error("Error: Failed to fetch the .NET {channel} Desktop Runtime download URL.")
+        echo("{YELLOW}Check your network, and that channel {channel} exists at{NC}")
+        echo("  {CYAN}https://builds.dotnet.microsoft.com/dotnet/release-metadata/{NC}")
+        exit(1)
+    }
+
+    log_info("Downloading .NET {channel} from: {dotnet_url}")
+    // Name the installer after its channel: self-describing if it is ever left
+    // behind, and it lets tests assert which runtime was actually requested.
+    const dotnet_installer = "{VRC_COMPATDATA}/pfx/drive_c/windowsdesktop-runtime-{channel}.exe"
+    if DRY_RUN {
+        return null
+    }
+
+    // -f, or curl exits 0 on a 404 and writes the error page. Handing wine an HTML
+    // file produces a failure that looks nothing like "the download 404'd".
+    $ curl -fL -o "{dotnet_installer}" "{dotnet_url}" $?
+
+    log_info("Installing .NET {channel} Desktop Runtime in VRChat prefix...")
+    run_in_prefix("wine C:/windowsdesktop-runtime-{channel}.exe /quiet /norestart")?
+    trust $ rm -f "{dotnet_installer}" $
+
+    verify_dotnet_runtime(channel)
+}
