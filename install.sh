@@ -19,6 +19,11 @@ readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Lo
 # Where the launch bridge payload is fetched from when there is no local copy.
 # The Pages domain first, since that is the short URL people install from; raw
 # GitHub second, because Pages serves a build that can lag behind a push.
+# This installer's own version, independent of the VRCOSC release it installs.
+# Bump it when cutting a tag; --version and --info report it, and it is the first
+# thing to ask for in a bug report.
+readonly SCRIPT_VERSION="1.0.0"
+
 # Where this script is published, for messages that tell people how to re-run it.
 readonly INSTALL_URL="https://vrcosc-linux.github.io/install.sh"
 
@@ -289,12 +294,13 @@ get_version_from_asset_url() {
 }
 
 print_usage() {
-    echo -e "${BOLD}VRCOSC Linux Installer & Manager${NC}"
+    echo -e "${BOLD}VRCOSC Linux Installer & Manager${NC} ${CYAN}v${SCRIPT_VERSION}${NC}"
     echo ""
     echo -e "${BOLD}Usage:${NC}"
     echo "  bash install.sh [OPTIONS]"
     echo ""
     echo -e "${BOLD}Options:${NC}"
+    echo "  -V, --version             Print this installer's version and exit"
     echo "  -i, --info                Display diagnostic system, prefix, runtime, and VRCOSC environment info"
     echo "  -b, --backup              Create a high-compression backup of VRCOSC configs & prefix registries to Desktop"
     echo "  -f, --force               Force re-download and re-installation of .NET and VRCOSC"
@@ -396,6 +402,10 @@ parse_arguments() {
                 # the default now, so this only states it explicitly.
                 PATCH_LAUNCH=1
                 shift
+                ;;
+            -V|--version)
+                echo "vrcosc-linux install.sh ${SCRIPT_VERSION}"
+                exit 0
                 ;;
             -h|--help)
                 print_usage
@@ -1064,6 +1074,7 @@ show_diagnostics() {
     local session_type="${XDG_SESSION_TYPE:-Unknown}"
     local desktop_session="${DESKTOP_SESSION:-Unknown}"
 
+    echo -e "  * Installer:             ${CYAN}v${SCRIPT_VERSION}${NC}"
     echo -e "  * OS:                    ${CYAN}${os_pretty}${NC}"
     echo -e "  * Kernel:                ${CYAN}${kernel_ver} (${arch})${NC}"
     echo -e "  * Desktop Environment:   ${CYAN}${de} (${session_type})${NC}"

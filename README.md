@@ -168,6 +168,7 @@ curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- [OPTIONS]
 | `--no-patch` | Leave VRChat's `launch.exe` alone. The bridge is patched in by default; without it everything works except `vrchat://` navigation from VRCOSC and companion tools |
 | `--prefix <PATH>` | Explicitly supply your custom VRChat compatdata/438100 path |
 | `--runtime <MODE>` | How wine is invoked: `auto` (default, probes and picks a working mode), `no-bwrap`, `host` (no Steam Runtime), `container` (Steam Runtime with bwrap) |
+| `-V, --version` | Print this installer's version and exit. Distinct from the VRCOSC release it installs; quote it in bug reports |
 | `-h, --help` | Show command usage and options |
 
 `--purge` is the only flag that destroys data you cannot get back from a
@@ -291,6 +292,11 @@ depend on them; it prints the command that does.
 Files are copied flat into `AppData/Local/VRCOSC`, not into Velopack's
 `current/` layout with an `Update.exe` beside it, so VRCOSC's in-app updater does
 nothing. That is intentional — this script is the updater. Re-run it to update.
+
+## Changelog
+
+Release notes are in [CHANGELOG.md](CHANGELOG.md). `--version` reports which
+build you are running.
 
 ## Community & Support
 
