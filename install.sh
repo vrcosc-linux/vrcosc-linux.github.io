@@ -81,8 +81,12 @@ get_vrcosc_install_dir() {
 # Steam prefixes routinely carry both steamuser and a real user name, and a user
 # may have pointed the directory somewhere else with a symlink.
 get_vrcosc_config_dirs() {
+    # Both channels use the same directory. VRCOSC's APP_NAME is "VRCOSC" for every
+    # Release build and only becomes "VRCOSC-Dev" under #if DEBUG, so a beta install
+    # reads and writes the live settings; only the install directory differs. Looking
+    # for a VRCOSC-Beta directory meant --purge --branch beta reported success having
+    # matched nothing.
     local leaf="VRCOSC"
-    [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && leaf="VRCOSC-Beta"
     local d
     for d in "$VRC_COMPATDATA/pfx/drive_c/users"/*/AppData/Roaming/"$leaf"; do
         [ -e "$d" ] && echo "$d"
@@ -932,7 +936,9 @@ show_diagnostics() {
         local cfgs_found=0
         for u in "$VRC_COMPATDATA/pfx/drive_c/users/"*; do
             local uname="$(basename "$u")"
-            for ch in "VRCOSC:Live" "VRCOSC-Beta:Beta"; do
+            # VRCOSC-Beta is not created by any release build; it is listed because a
+            # hand-made setup may still have one.
+            for ch in "VRCOSC:Live and Beta" "VRCOSC-Beta:Beta (custom)"; do
                 local folder="${ch%%:*}"
                 local label="${ch##*:}"
                 local cfg_dir="$u/AppData/Roaming/$folder"
@@ -1643,6 +1649,12 @@ EOF_DESKTOP
 
     local vrcosc_dir="$(get_vrcosc_install_dir)"
     log_success "=== VRCOSC Setup Complete! ==="
+    if [ "$VRCOSC_BRANCH" = "beta" ]; then
+        echo -e "${YELLOW}Beta note:${NC} module packages built for a beta SDK are published as"
+        echo -e "  pre-releases, and VRCOSC hides those unless ${CYAN}Allow Pre-Release Packages${NC} is"
+        echo -e "  enabled in Settings. Without it the Packages tab offers only stable builds,"
+        echo -e "  which will not load on beta. Beta also shares its settings with live."
+    fi
     echo -e "You can launch VRCOSC from your application menu, or run '${BLUE}$(basename "$launch_script")${NC}' in the terminal."
     echo -e "\n${BLUE}VRCOSC Directory Paths:${NC}"
     echo -e "  * ${GREEN}Config Folder (Profiles & Settings):${NC}"
@@ -1657,6 +1669,10 @@ EOF_DESKTOP
 purge_vrcosc_config() {
     local dirs resolved d purged=0
     dirs="$(get_vrcosc_config_dirs)"
+
+    if [ "$VRCOSC_BRANCH" = "beta" ]; then
+        log_warn "Note: beta shares its settings with the live install, so this purges both."
+    fi
 
     if [ -z "$dirs" ]; then
         log_info "No $VRCOSC_BRANCH configuration directory found; nothing to purge."

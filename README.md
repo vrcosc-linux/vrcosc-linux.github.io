@@ -114,7 +114,7 @@ bash install.sh [OPTIONS]
 | `-i, --info` | Diagnostics: OS, tooling, Proton build, prefix, .NET runtime vs what VRCOSC requires, wine environment health, whether a VRChat session is joinable, and installed vs released VRCOSC versions |
 | `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC settings, profiles, packages and the prefix registries to your Desktop. Symlinked config directories are followed, and the regenerated `runtime/` and `logs/` caches are left out |
 | `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
-| `--branch <live\|beta>` | Choose release channel, `live` or `beta`, default `live`. Beta is published as a GitHub prerelease and installs alongside live, with its own directory, settings and `vrcosc-beta` command |
+| `--branch <live\|beta>` | Choose release channel, `live` or `beta`, default `live`. Beta is published as a GitHub prerelease and installs into its own directory with a `vrcosc-beta` command, but **shares its settings with live**: VRCOSC uses the same config directory for every release build |
 | `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |
 | `--purge` | Also delete VRCOSC's settings, profiles and logs for the selected `--branch`, for every user in the prefix. Use with `--uninstall` to remove the binaries too, or on its own to delete only settings; it never installs anything. If the config directory is a symlink, the target is deleted, so check `--purge --dry-run` first |
 | `--dry-run` | Simulate actions without modifying files or installing runtimes. Honoured by every mode, including `--uninstall` and `--purge` |
@@ -184,6 +184,13 @@ GitHub rate-limited your address. Wait an hour, or
 **"Installed VRCOSC … is newer than the latest release; not downgrading."**
 Working as intended — you have a build ahead of the published release. Use
 `--force` if you really want the released version.
+
+**On beta, the Packages tab offers only stable module versions, and they fail to
+import.**
+Modules built against a beta SDK are published as pre-releases, and VRCOSC hides
+pre-releases unless **Allow Pre-Release Packages** is enabled in Settings. A
+stable-built module will not load on beta, so until that setting is on the list
+looks normal and nothing works.
 
 **`vrchat://` links and in-game navigation from VRCOSC do nothing.**
 The `launch.exe` bridge is not installed. It is opt-in: rerun the installer with

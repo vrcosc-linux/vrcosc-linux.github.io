@@ -31,8 +31,18 @@ it "finds the config directory for every user in the prefix"
 setup find1
 assert_eq "2" "$(get_vrcosc_config_dirs | wc -l)"
 
-it "points at the beta directory for the beta branch"
-assert_contains "$(VRCOSC_BRANCH=beta get_vrcosc_config_dirs | head -1)" "VRCOSC-Beta"
+# VRCOSC's APP_NAME is "VRCOSC" for every Release build, so a beta install reads
+# and writes the live settings. Looking for VRCOSC-Beta matched nothing and made
+# --purge --branch beta claim success while deleting nothing.
+it "uses the same directory for beta, because the app does"
+assert_eq "$(get_vrcosc_config_dirs)" "$(VRCOSC_BRANCH=beta get_vrcosc_config_dirs)"
+
+it "and does not go looking for a VRCOSC-Beta directory"
+assert_not_contains "$(VRCOSC_BRANCH=beta get_vrcosc_config_dirs)" "VRCOSC-Beta"
+
+it "warns that purging beta takes the live settings with it"
+setup betawarn
+assert_contains "$(VRCOSC_BRANCH=beta DRY_RUN=1 purge_vrcosc_config 2>&1)" "shares its settings with the live install"
 
 it "a dry-run purge deletes nothing"
 setup dry1
@@ -56,7 +66,7 @@ for u in steamuser someone; do
 done
 assert_eq "gone gone " "$gone"
 
-it "and leaves the beta config alone"
+it "leaves a hand-made VRCOSC-Beta directory alone"
 assert_file_exists "$USERS/steamuser/AppData/Roaming/VRCOSC-Beta/config.json"
 
 it "and never touches a directory it did not create"
