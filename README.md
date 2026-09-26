@@ -49,6 +49,11 @@ This installer configures VRCOSC to run seamlessly by:
    this, `Process.GetProcessesByName("vrchat")` returns nothing, so VRCOSC treats
    the game as permanently closed and every VRChat-dependent feature stays inert.
 
+Switching between `live` and `beta` needs more than swapping the binaries,
+because the two share their settings, profiles and packages. What has to change,
+what the installer does today and what is still manual is written down in
+[docs/channel-switching.md](docs/channel-switching.md).
+
 Steps 3, 6 and 8 exist because of measured behaviour, not guesswork — the
 evidence, including what each communication channel does and does not survive, is
 in [docs/prefix-session-findings.md](docs/prefix-session-findings.md).
