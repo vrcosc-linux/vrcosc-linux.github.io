@@ -182,12 +182,14 @@ resolve_launch_bridge() {
     echo "$cache"
 }
 
+# One path per line. A single space-separated line only survives word splitting,
+# which loses any path whose $HOME contains a space.
 get_all_installed_files() {
-    echo "$(get_launcher_script live)" \
-         "$(get_launcher_script beta)" \
-         "$(get_desktop_file live)" \
-         "$(get_desktop_file beta)" \
-         "$(get_app_icon_path)"
+    get_launcher_script live
+    get_launcher_script beta
+    get_desktop_file live
+    get_desktop_file beta
+    get_app_icon_path
 }
 
 get_vrcosc_version_from_dir() {
@@ -308,7 +310,15 @@ parse_arguments() {
                 ;;
             --branch)
                 if [ -n "${2:-}" ]; then
-                    VRCOSC_BRANCH="$2"
+                    case "$2" in
+                        live|beta) VRCOSC_BRANCH="$2" ;;
+                        *)
+                            # Only "beta" was ever special-cased, so a typo installed
+                            # live under whatever name the user typed.
+                            log_error "Error: unknown branch '$2'. Use 'live' or 'beta'."
+                            exit 1
+                            ;;
+                    esac
                     shift 2
                 else
                     log_error "Error: --branch requires an argument (live or beta)."
@@ -1232,7 +1242,10 @@ create_backup() {
     mkdir -p "$desktop_dir"
 
     local timestamp="$(date +%s)"
-    local stage_dir="/tmp/vrcosc_backup_${timestamp}"
+    # mkdir -p on a fixed name succeeds on a directory someone else created and
+    # can read, and the staged copy includes module settings with API tokens in it.
+    local stage_dir
+    stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/vrcosc_backup_${timestamp}.XXXXXX")"
     mkdir -p "$stage_dir"
 
     local items_found=0
@@ -1282,8 +1295,9 @@ create_backup() {
     done
 
     # 3. Launchers & desktop shortcuts
-    for f in $(get_all_installed_files); do
-        if [ -f "$f" ]; then
+    # read, not word-splitting: these paths are under $HOME, which may contain spaces.
+    while IFS= read -r f; do
+        if [ -n "$f" ] && [ -f "$f" ]; then
             mkdir -p "$stage_dir/launchers"
             cp "$f" "$stage_dir/launchers/"
             items_found=1
@@ -1342,7 +1356,10 @@ Windows Registry Editor Version 5.00
 "DisableHWAcceleration"=dword:00000001
 EOF_REG
 
-    run_in_prefix "wine regedit C:\\vrcosc_disable_hw_acc.reg"
+    # Forward slashes: protontricks passes the command through sh -c unescaped, so
+    # "C:\vrcosc..." reaches wine as "C:vrcosc...", a drive-relative path that
+    # happens to resolve only because wine starts at the root of drive C.
+    run_in_prefix "wine regedit C:/vrcosc_disable_hw_acc.reg"
     rm -f "$reg_file"
     log_success "WPF registry patch applied successfully."
 }
@@ -1437,9 +1454,16 @@ install_dotnet_runtime() {
     fi
 
     log_info "Fetching latest .NET ${channel} Desktop Runtime download URL..."
-    local releases_json dotnet_url
-    releases_json="$(curl -fsS --connect-timeout 10 \
-        "https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${channel}/releases.json" 2>&1 || true)"
+    # builds.dotnet.microsoft.com is the host Microsoft's January 2025 notice moved
+    # this metadata to; the blob host still answers, so it stays as a fallback
+    # rather than being the only way in.
+    local releases_json dotnet_url meta_host
+    releases_json=""
+    for meta_host in builds.dotnet.microsoft.com dotnetcli.blob.core.windows.net; do
+        releases_json="$(curl -fsS --connect-timeout 10 \
+            "https://${meta_host}/dotnet/release-metadata/${channel}/releases.json" 2>/dev/null || true)"
+        [ -n "$releases_json" ] && break
+    done
     dotnet_url="$(grep -o 'https://[^"]*windowsdesktop-runtime-[0-9.]*-win-x64.exe' <<< "$releases_json" \
         | head -n 1 || true)"
 
@@ -1450,7 +1474,7 @@ install_dotnet_runtime() {
         fi
         log_error "Error: Failed to fetch the .NET ${channel} Desktop Runtime download URL."
         echo -e "${YELLOW}Check your network, and that channel ${channel} exists at${NC}"
-        echo -e "  ${CYAN}https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/${NC}"
+        echo -e "  ${CYAN}https://builds.dotnet.microsoft.com/dotnet/release-metadata/${NC}"
         exit 1
     fi
 
@@ -1460,10 +1484,12 @@ install_dotnet_runtime() {
     local dotnet_installer="$VRC_COMPATDATA/pfx/drive_c/windowsdesktop-runtime-${channel}.exe"
     [ "$DRY_RUN" -eq 1 ] && return 0
 
-    curl -L -o "$dotnet_installer" "$dotnet_url"
+    # -f, or curl exits 0 on a 404 and writes the error page. Handing wine an HTML
+    # file produces a failure that looks nothing like "the download 404'd".
+    curl -fL -o "$dotnet_installer" "$dotnet_url"
 
     log_info "Installing .NET ${channel} Desktop Runtime in VRChat prefix..."
-    run_in_prefix "wine C:\\windowsdesktop-runtime-${channel}.exe /quiet /norestart"
+    run_in_prefix "wine C:/windowsdesktop-runtime-${channel}.exe /quiet /norestart"
     rm -f "$dotnet_installer"
 
     verify_dotnet_runtime "$channel"
@@ -1552,10 +1578,20 @@ install_vrcosc() {
     fi
 
     log_info "Downloading VRCOSC package from: $nupkg_url"
-    local nupkg_file="/tmp/vrcosc-latest.nupkg"
     [ "$DRY_RUN" -eq 1 ] && return 0
 
-    curl -L -o "$nupkg_file" "$nupkg_url"
+    # mktemp, not a fixed name: a predictable path in a shared /tmp lets another
+    # local user pre-plant a symlink and have the download land on a file of ours.
+    local work_dir
+    work_dir="$(mktemp -d "${TMPDIR:-/tmp}/vrcosc-install.XXXXXX")" || {
+        log_error "Could not create a temporary directory."
+        exit 1
+    }
+    local nupkg_file="$work_dir/vrcosc-latest.nupkg"
+
+    # -f, or a 404 body lands in the .nupkg and unzip reports a corrupt archive
+    # through the ERR trap, naming nothing useful.
+    curl -fL -o "$nupkg_file" "$nupkg_url"
 
     local vrcosc_dir="$(get_vrcosc_install_dir)"
     log_info "Installing VRCOSC to $vrcosc_dir..."
@@ -1564,14 +1600,12 @@ install_vrcosc() {
     # Clean previous installation binaries
     rm -rf "${vrcosc_dir:?}"/*
 
-    local temp_extract="/tmp/vrcosc-extract"
-    rm -rf "$temp_extract"
+    local temp_extract="$work_dir/extract"
     mkdir -p "$temp_extract"
     unzip -q "$nupkg_file" -d "$temp_extract"
 
     cp -r "$temp_extract/lib/app/"* "$vrcosc_dir/"
-    rm -f "$nupkg_file"
-    rm -rf "$temp_extract"
+    rm -rf "$work_dir"
     log_success "VRCOSC files extracted successfully."
 }
 
@@ -1729,26 +1763,51 @@ patch_vrchat_launch_bridge() {
         return 0
     fi
 
-    # Backup original launch.exe if launch.org.exe does not exist
-    if [ ! -f "$backup_launch" ]; then
-        if [ -f "$target_launch" ]; then
-            log_info "Creating read-only backup of original launch.exe -> launch.org.exe..."
-            cp -p "$target_launch" "$backup_launch"
-            chmod 444 "$backup_launch"
-        fi
-    fi
-
-    # Compare checksum or size to see if already patched
+    # Already patched? Check before touching the backup. Backing up a launch.exe
+    # that is already the bridge would make the bridge its own fallback, and
+    # RunOriginal() starting launch.org.exe would then re-enter the bridge with no
+    # bound -- every time the pipe is unavailable, i.e. whenever VRChat is closed.
     if files_identical "$source_bridge" "$target_launch"; then
         log_success "VRChat launch.exe is already patched with the Linux IPC bridge."
         chmod 555 "$target_launch" 2>/dev/null || true
         return 0
     fi
 
+    # Backup original launch.exe if launch.org.exe does not exist
+    if [ ! -f "$backup_launch" ]; then
+        if [ -f "$target_launch" ]; then
+            # files_identical above only compared against the bridge we are about to
+            # install. An older bridge build differs from it byte for byte and would
+            # still recurse, so check for the payload's own marker as well.
+            if is_launch_bridge "$target_launch"; then
+                log_warn "launch.exe is already a launch bridge but launch.org.exe is missing,"
+                log_warn "so there is no stock launcher to fall back on. Use Steam's"
+                log_warn "'Verify integrity of game files' on VRChat, then run this again."
+                return 0
+            fi
+            log_info "Creating read-only backup of original launch.exe -> launch.org.exe..."
+            cp -p "$target_launch" "$backup_launch"
+            chmod 444 "$backup_launch"
+        fi
+    fi
+
     log_info "Installing Linux IPC launch.exe wrapper into VRChat directory..."
-    # If target is read-only, remove write protection temporarily to replace
-    rm -f "$target_launch" 2>/dev/null || chmod 755 "$target_launch" 2>/dev/null || true
-    cp "$source_bridge" "$target_launch"
+    # Stage beside the target and rename over it, so a failed copy cannot leave
+    # VRChat with no launch.exe at all. Same filesystem, so the mv is atomic.
+    local staged="$vrc_game_dir/.launch.exe.new.$$"
+    if ! cp "$source_bridge" "$staged" 2>/dev/null; then
+        rm -f "$staged" 2>/dev/null || true
+        log_warn "Could not write into $vrc_game_dir; leaving launch.exe untouched."
+        return 0
+    fi
+    chmod 555 "$staged" 2>/dev/null || true
+    # The installed bridge is 555, so make it writable before the rename replaces it.
+    chmod 755 "$target_launch" 2>/dev/null || true
+    if ! mv -f "$staged" "$target_launch" 2>/dev/null; then
+        rm -f "$staged" 2>/dev/null || true
+        log_warn "Could not replace $target_launch; it has been left as it was."
+        return 0
+    fi
     chmod 555 "$target_launch"
     log_success "VRChat launch.exe patched successfully (read-only 555)."
 }
@@ -1820,6 +1879,13 @@ repatch_launch_bridge() {
         return 0
     fi
     if [ ! -f "\$backup" ] && [ -f "\$target" ]; then
+        # Never let the bridge become its own fallback: RunOriginal() would start
+        # launch.org.exe, which would be the bridge, with no bound. An older bridge
+        # build differs from the payload byte for byte, so check the marker too.
+        if grep -aqF 'launch_bridge_ready' "\$target" 2>/dev/null; then
+            echo "VRCOSC: launch.exe is a launch bridge but launch.org.exe is missing; use Steam's 'Verify integrity of game files' on VRChat." >&2
+            return 0
+        fi
         cp -p "\$target" "\$backup" 2>/dev/null || return 0
         chmod 444 "\$backup" 2>/dev/null || true
     fi
@@ -1971,6 +2037,15 @@ purge_vrcosc_config() {
 # Put VRChat's own launch.exe back. Only the bridge is ours to remove: if Steam
 # has already restored a stock launcher, or shipped a newer one, that file stays
 # and only our now-redundant backup goes.
+# True when a file is one of our launch bridges, of any build. The payload embeds
+# this marker; VRChat's own launcher does not. Used where comparing against the
+# current payload is not enough, because an older bridge differs from it byte for
+# byte while behaving exactly the same way.
+is_launch_bridge() {
+    [ -f "$1" ] || return 1
+    grep -aqF 'launch_bridge_ready' "$1" 2>/dev/null
+}
+
 restore_vrchat_launch_bridge() {
     local game_dir target backup payload
     game_dir="$(get_vrchat_game_dir)"
@@ -1992,6 +2067,16 @@ restore_vrchat_launch_bridge() {
 
     if files_identical "$target" "$backup"; then
         log_info "launch.exe is already VRChat's own; removing the redundant backup."
+        rm -f "$backup"
+        return 0
+    fi
+
+    # A backup taken from an already-bridged launch.exe is not a stock launcher.
+    # Restoring it would leave the bridge in place under a name that says otherwise.
+    if is_launch_bridge "$backup"; then
+        log_warn "launch.org.exe is itself a launch bridge, not VRChat's own launcher,"
+        log_warn "so there is nothing to restore. Removing it; use Steam's 'Verify"
+        log_warn "integrity of game files' on VRChat to get the stock launcher back."
         rm -f "$backup"
         return 0
     fi
@@ -2030,8 +2115,9 @@ uninstall_vrcosc() {
     done
 
     # Remove launchers, shortcuts, and icon
-    for f in $(get_all_installed_files); do
-        if [ -f "$f" ]; then
+    # read, not word-splitting: these paths are under $HOME, which may contain spaces.
+    while IFS= read -r f; do
+        if [ -n "$f" ] && [ -f "$f" ]; then
             if [ "$DRY_RUN" -eq 1 ]; then
                 log_info "Would remove file: $f"
             else
@@ -2040,7 +2126,7 @@ uninstall_vrcosc() {
             fi
             removed=1
         fi
-    done
+    done <<< "$(get_all_installed_files)"
 
     # Undo the launch.exe patch, and drop the bridge payload we cached for it.
     restore_vrchat_launch_bridge && removed=1

@@ -344,4 +344,43 @@ it "while a real uninstall does remove the install directory"
 PATH="$WORK/bin:$PATH" uninstall_vrcosc >/dev/null 2>&1
 assert_eq "1" "$([ -e "$app_dir/VRCOSC.dll" ] && echo 0 || echo 1)"
 
+# --- the bridge must never become its own fallback ----------------------------
+# launch.org.exe is what RunOriginal() starts. If it is a bridge, that call
+# re-enters the bridge, which calls RunOriginal() again, with no bound -- and it
+# happens on every launch where the pipe is unavailable, i.e. VRChat not running.
+
+VRC_COMPATDATA="$("$FIXTURES/make-prefix.sh" --root "$WORK/steam-recursion")"
+game_dir="$(get_vrchat_game_dir)"
+
+it "refuses to back up a launch.exe that is already a bridge"
+# The payload embeds this marker; a different bridge build carries it too, which
+# is why comparing against the current payload is not enough on its own.
+printf 'MZ an older launch_bridge_ready build\n' > "$game_dir/launch.exe"
+rm -f "$game_dir/launch.org.exe"
+out="$(PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge 2>&1)"
+assert_eq "1" "$([ -e "$game_dir/launch.org.exe" ] && echo 0 || echo 1)"
+
+it "and says the stock launcher has to come from Steam"
+assert_contains "$out" "Verify integrity of game files"
+
+it "and leaves launch.exe as it found it, rather than half-patching"
+assert_eq "MZ an older launch_bridge_ready build" "$(cat "$game_dir/launch.exe")"
+
+it "a stock launch.exe is still backed up normally"
+printf 'MZ stub launch.exe\n' > "$game_dir/launch.exe"
+rm -f "$game_dir/launch.org.exe"
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+assert_eq "MZ stub launch.exe" "$(cat "$game_dir/launch.org.exe")"
+
+it "uninstall refuses to restore a backup that is itself a bridge"
+# The installer leaves these 444/555, so make them writable to stage the scenario.
+chmod 644 "$game_dir/launch.org.exe" "$game_dir/launch.exe"
+printf 'MZ a launch_bridge_ready build\n' > "$game_dir/launch.org.exe"
+printf 'MZfake-bridge-payload' > "$game_dir/launch.exe"
+out="$(PATH="$WORK/bin:$PATH" restore_vrchat_launch_bridge 2>&1)"
+assert_contains "$out" "itself a launch bridge"
+
+it "and drops the bogus backup rather than leaving it to be trusted later"
+assert_eq "1" "$([ -e "$game_dir/launch.org.exe" ] && echo 0 || echo 1)"
+
 summarise
