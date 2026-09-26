@@ -95,6 +95,14 @@ Copy and paste the following command into your terminal:
 curl -sSL https://vrcosc-linux.github.io/install.sh | bash
 ```
 
+Through a pipe, options go to `bash` itself unless you separate them with
+`-s --`, so `| bash --uninstall` fails with "invalid option". Pass them like
+this:
+
+```bash
+curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- --branch beta
+```
+
 ## CLI Options & Usage
 
 ```bash
@@ -104,7 +112,7 @@ bash install.sh [OPTIONS]
 | Option | Description |
 | :--- | :--- |
 | `-i, --info` | Diagnostics: OS, tooling, Proton build, prefix, .NET runtime vs what VRCOSC requires, wine environment health, whether a VRChat session is joinable, and installed vs released VRCOSC versions |
-| `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC configs & prefix registries to Desktop |
+| `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC settings, profiles, packages and the prefix registries to your Desktop. Symlinked config directories are followed, and the regenerated `runtime/` and `logs/` caches are left out |
 | `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
 | `--branch <live\|beta>` | Choose release channel, `live` or `beta`, default `live`. Beta is published as a GitHub prerelease and installs alongside live, with its own directory, settings and `vrcosc-beta` command |
 | `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |

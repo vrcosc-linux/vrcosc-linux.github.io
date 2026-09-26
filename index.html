@@ -36,6 +36,12 @@
   }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9rem; }
   a { color: var(--link); }
+  p.note { color: var(--muted); margin: 0 0 .75rem; }
+  table { border-collapse: collapse; width: 100%; margin: 0; display: block; overflow-x: auto; }
+  th, td { border-bottom: 1px solid var(--border); padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { font-weight: 600; white-space: nowrap; }
+  td:first-child { white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
   ul { padding-left: 1.2rem; }
   li { margin: .35rem 0; }
   footer { margin-top: 2.5rem; color: var(--muted); font-size: .875rem; }
@@ -54,6 +60,38 @@
     <li>Start VRChat first, then run <code>vrcosc</code> or launch it from your application menu.</li>
     <li>Run <code>bash install.sh --info</code> if anything misbehaves.</li>
   </ul>
+
+  <h2>Options</h2>
+  <p class="note">Through a pipe, the flags go to <code>bash</code> unless you separate them
+  with <code>-s --</code>. So a beta install is:</p>
+  <pre><code>curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- --branch beta</code></pre>
+
+  <table>
+    <thead><tr><th>Option</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td><code>-i</code>, <code>--info</code></td><td>Diagnostics: OS, Proton build, prefix, the .NET runtime VRCOSC needs versus what is installed, whether a VRChat session is joinable, and installed versus released versions. Changes nothing.</td></tr>
+      <tr><td><code>-b</code>, <code>--backup</code></td><td>Write a compressed backup of settings, profiles, packages and the prefix registries to your desktop.</td></tr>
+      <tr><td><code>-f</code>, <code>--force</code></td><td>Reinstall .NET and VRCOSC even when the installed build is current or newer.</td></tr>
+      <tr><td><code>--branch live|beta</code></td><td>Release channel, default <code>live</code>. Beta is published as a prerelease and installs alongside live with its own settings and a <code>vrcosc-beta</code> command.</td></tr>
+      <tr><td><code>--patch</code></td><td>Replace VRChat's <code>launch.exe</code> with the IPC bridge, enabling <code>vrchat://</code> navigation. Off by default, since it modifies VRChat's install directory. <code>--path</code> also works.</td></tr>
+      <tr><td><code>-u</code>, <code>--uninstall</code></td><td>Remove the binaries, launcher and desktop entry, and restore VRChat's original <code>launch.exe</code>. Settings are kept.</td></tr>
+      <tr><td><code>--purge</code></td><td>Also delete settings, profiles and logs for the selected branch. Use with <code>--uninstall</code>, or alone to drop only settings. Follows the config directory if it is a symlink, so try it with <code>--dry-run</code> first.</td></tr>
+      <tr><td><code>--dry-run</code></td><td>Say what would happen and change nothing. Honoured by every mode, including <code>--uninstall</code> and <code>--purge</code>.</td></tr>
+      <tr><td><code>--skip-firewall</code></td><td>Do not inspect or add firewall rules for the OSC ports.</td></tr>
+      <tr><td><code>--prefix PATH</code></td><td>Use this VRChat <code>compatdata/438100</code> directory instead of searching for one.</td></tr>
+      <tr><td><code>--runtime MODE</code></td><td>How wine is invoked: <code>auto</code> (default), <code>no-bwrap</code>, <code>host</code>, <code>container</code>.</td></tr>
+      <tr><td><code>-h</code>, <code>--help</code></td><td>Show the options.</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Environment variables</h2>
+  <table>
+    <thead><tr><th>Variable</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><code>VRCOSC_JOIN=0</code></td><td>Launcher only: do not join VRChat's wine session, always run standalone.</td></tr>
+      <tr><td><code>GITHUB_TOKEN</code>, <code>GH_TOKEN</code></td><td>Used for release lookups. The unauthenticated GitHub API allows 60 requests an hour per address, which shared connections exhaust.</td></tr>
+    </tbody>
+  </table>
 
   <h2>More</h2>
   <ul>

@@ -1023,14 +1023,35 @@ create_backup() {
     local items_found=0
 
     # 1. Config directories (Roaming/VRCOSC, Roaming/VRCOSC-Beta)
+    #
+    # -L, not -a: a config directory is very often a symlink to cloud storage, and
+    # copying the link instead of what it points at produced a backup containing a
+    # 62-byte path string in place of every setting and profile. This is the one
+    # feature whose whole job is to be correct before something destructive.
+    #
+    # runtime/ and logs/ are left out. They are caches VRCOSC rebuilds, they are
+    # the bulk of the size (540 MB and growing here), and a backup nobody can
+    # afford to keep is a backup nobody makes.
     for u in "$VRC_COMPATDATA/pfx/drive_c/users/"*; do
         local username="$(basename "$u")"
         for folder in "VRCOSC" "VRCOSC-Beta"; do
-            if [ -d "$u/AppData/Roaming/$folder" ]; then
-                mkdir -p "$stage_dir/users/${username}/AppData/Roaming"
-                cp -a "$u/AppData/Roaming/$folder" "$stage_dir/users/${username}/AppData/Roaming/"
-                items_found=1
-            fi
+            local src="$u/AppData/Roaming/$folder"
+            [ -d "$src" ] || continue
+            local dest="$stage_dir/users/${username}/AppData/Roaming/$folder"
+            mkdir -p "$dest"
+            local entry name
+            for entry in "$src"/*; do
+                [ -e "$entry" ] || continue
+                name="$(basename "$entry")"
+                case "$name" in
+                    runtime|logs)
+                        log_info "  skipping $folder/$name (regenerated cache)"
+                        continue
+                        ;;
+                esac
+                cp -RL "$entry" "$dest/" 2>/dev/null || cp -R "$entry" "$dest/"
+            done
+            items_found=1
         done
     done
 
