@@ -43,6 +43,21 @@ assert_eq "$REPO_ROOT/bin/vrc-launch-bridge.exe" "$(resolve_launch_bridge)"
 it "the shipped bridge is a real PE binary"
 assert_eq "MZ" "$(head -c 2 "$REPO_ROOT/bin/vrc-launch-bridge.exe")"
 
+it "the shipped bridge carries the marker the recursion guard greps for"
+# The marker first existed only because the assembly happened to be named
+# launch_bridge_ready. A rebuild that changed the assembly name dropped it, and
+# nothing would have failed until a bridge got backed up over itself.
+assert_ok "$(grep -aqF 'launch_bridge_ready' "$REPO_ROOT/bin/vrc-launch-bridge.exe"; echo $?)"
+
+it "and is_launch_bridge recognises it"
+is_launch_bridge "$REPO_ROOT/bin/vrc-launch-bridge.exe"
+assert_ok "$?"
+
+it "and does not recognise something that is not a bridge"
+printf 'MZ stub launch.exe\n' > "$WORK/not-a-bridge.exe"
+is_launch_bridge "$WORK/not-a-bridge.exe"
+assert_fails "$?"
+
 # From here on, pretend there is no script file at all -- the piped-install case.
 get_script_dir() { return 0; }
 

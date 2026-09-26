@@ -37,7 +37,7 @@ readonly -a LAUNCH_BRIDGE_URLS=(
 # Regenerate with: sha256sum bin/vrc-launch-bridge.exe
 # Not readonly, so tests can point it at their own fake payload and exercise this
 # code path rather than stubbing it out.
-LAUNCH_BRIDGE_SHA256="c197a64f8411c11bcfe8a5df1868cf7734851cfd56a494155ba29db31cbb2297"
+LAUNCH_BRIDGE_SHA256="7496e1f85b494970542055882df20ca2bbedde5cb54f3d2136c412e15d94484b"
 
 # Default state variables (configured solely via command-line arguments)
 VRCOSC_BRANCH="live" # live or beta

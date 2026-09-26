@@ -48,19 +48,19 @@ This installer configures VRCOSC to run seamlessly by:
      backup beside it, it says so and leaves the file alone; Steam's *Verify
      integrity of game files* restores the stock launcher.
 
-   **The bridge binary.** You are being asked to trust a 4.6 KB executable dropped
-   over a game file, so: the source is [`bin/vrc-launch-bridge.cs`](bin/vrc-launch-bridge.cs),
-   and it targets .NET Framework 4 — wine-mono, which Proton ships. Its PE header
-   says PE32, machine i386, subsystem 3 (console), with the timestamp zeroed as a
-   deterministic Roslyn build leaves it, which corresponds to
+   **The bridge binary.** You are being asked to trust a small executable dropped
+   over a game file, so it is built from [`bin/vrc-launch-bridge.cs`](bin/vrc-launch-bridge.cs)
+   by [`bin/bridge.csproj`](bin/bridge.csproj) — net40, x86, console subsystem, which
+   is what wine-mono runs — with
 
-   ```
-   csc /target:exe /platform:x86 /out:bin/vrc-launch-bridge.exe bin/vrc-launch-bridge.cs
+   ```bash
+   dotnet build bin/bridge.csproj -c Release
+   cat bin/obj/out/Release/launch_bridge_ready.exe > bin/vrc-launch-bridge.exe
    ```
 
-   That command is read off the binary's headers rather than reproduced here, so
-   treat it as a description of the shipped build, not a guarantee of a byte-identical
-   rebuild.
+   The assembly is named `launch_bridge_ready` on purpose: that string lands in the
+   binary and is how the installer recognises a bridge, so that it never backs up a
+   `launch.exe` that is already one.
 
    `install.sh` pins its sha256 and refuses any download that does not match, so a
    GitHub Pages deployment lagging behind `main` cannot hand you a different
@@ -68,7 +68,7 @@ This installer configures VRCOSC to run seamlessly by:
 
    ```bash
    sha256sum bin/vrc-launch-bridge.exe
-   # c197a64f8411c11bcfe8a5df1868cf7734851cfd56a494155ba29db31cbb2297
+   # 7496e1f85b494970542055882df20ca2bbedde5cb54f3d2136c412e15d94484b
    ```
 7. **Setting up official application branding and desktop integration** (`vrcosc.png` hicolor icon, `vrcosc.desktop` launcher, and terminal command `vrcosc`).
 8. **Running VRCOSC inside VRChat's own wine session.** The generated launcher finds

@@ -37,3 +37,9 @@ jobs:
           echo "pinned: $pinned"
           echo "actual: $actual"
           [ "$pinned" = "$actual" ]
+
+      # The installer recognises a bridge by this string. It used to be present
+      # only because of the assembly name, so a rebuild could drop it silently and
+      # nothing would fail until a bridge was backed up over itself.
+      - name: The bridge carries its marker
+        run: grep -aqF launch_bridge_ready bin/vrc-launch-bridge.exe
