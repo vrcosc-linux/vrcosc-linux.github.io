@@ -90,7 +90,26 @@ assert_eq "True" "$(get AllowPreReleasePackages)"
 
 # --- the package cache, which only a switch may clear ---
 
-seed_packages() { printf '{"local.modules":"2026.0812.8","official.modules":"2026.501.1"}\n' > "$CFG/packages.json"; }
+# The shape VRCOSC actually writes, copied from a real packages.json: a list of
+# {package_id, version} under "installed", beside a "cache" holding the whole
+# remote catalogue. Getting this wrong is not academic -- the first version of
+# this code treated the file as a flat id->version map and printed "cache" at the
+# user instead of the two modules they had to reinstall.
+seed_packages() {
+    cat > "$CFG/packages.json" <<'PKG'
+{
+  "installed": [
+    {"package_id": "volcanicarts.vrcosc.officialmodules", "version": "2026.906.1"},
+    {"package_id": "bluscream.vrcosc.modules", "version": "2026.0926.0"}
+  ],
+  "cache_expire_time": "2026-09-27T03:15:35.4474707+02:00",
+  "cache": [
+    {"owner": "VolcanicArts", "name": "VRCOSC-Modules", "repository": {"default_branch": "main"}}
+  ],
+  "version": 1
+}
+PKG
+}
 
 it "a channel switch clears the package cache"
 write_settings '{"settings":{"UpdateChannel":0},"metadata":{},"version":1}'
@@ -100,7 +119,13 @@ out="$(apply_channel_settings 2>&1)"
 assert_eq "0" "$([ -f "$CFG/packages.json" ] && echo 1 || echo 0)"
 
 it "and prints what was installed, since that list is the only record"
-assert_contains "$out" "official.modules 2026.501.1"
+assert_contains "$out" "volcanicarts.vrcosc.officialmodules 2026.906.1"
+
+it "and prints every installed package, not just the first"
+assert_contains "$out" "bluscream.vrcosc.modules 2026.0926.0"
+
+it "and does not offer the remote catalogue as something to reinstall"
+assert_not_contains "$out" "* cache"
 
 it "re-running the same channel keeps the package cache"
 write_settings '{"settings":{"UpdateChannel":1},"metadata":{},"version":1}'
@@ -128,6 +153,13 @@ assert_contains "$(cat "$CFG/settings.json")" '"UpdateChannel": 1'
 
 it "and so is pre-release visibility"
 assert_contains "$(cat "$CFG/settings.json")" '"AllowPreReleasePackages": true'
+
+it "without python3, the package ids are still recovered before deletion"
+write_settings '{"settings":{"UpdateChannel":0},"metadata":{},"version":1}'
+seed_packages
+VRCOSC_BRANCH="beta"
+out="$(PATH="$WORK/nopython:$PATH" apply_channel_settings 2>&1)"
+assert_contains "$out" "bluscream.vrcosc.modules"
 
 it "and a switch detected without python3 still clears the cache"
 write_settings '{"settings":{"UpdateChannel":0},"metadata":{},"version":1}'

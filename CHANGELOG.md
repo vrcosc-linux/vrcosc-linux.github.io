@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.1 — 2026-09-26
+
+- The package list printed before a channel switch clears `packages.json` named
+  `cache` instead of the installed modules. The parser assumed the file was a
+  flat `id: version` map; a real one is
+  `{"installed": [{"package_id", "version"}], "cache": [...]}`, where `cache` is
+  the remote catalogue. Caught by running a real reinstall, not by the tests,
+  which used a fixture of the same invented shape — that fixture is now a copy of
+  a real file. The grep fallback also runs whenever the parse yields nothing,
+  rather than only when `python3` is absent, since it can equally be present and
+  broken.
+
 ## v1.0.0 — 2026-09-26
 
 First tagged release. The installer existed and worked before this; the version

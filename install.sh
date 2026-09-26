@@ -22,7 +22,7 @@ readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Lo
 # This installer's own version, independent of the VRCOSC release it installs.
 # Bump it when cutting a tag; --version and --info report it, and it is the first
 # thing to ask for in a bug report.
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 
 # Where this script is published, for messages that tell people how to re-run it.
 readonly INSTALL_URL="https://vrcosc-linux.github.io/install.sh"
@@ -585,17 +585,34 @@ invalidate_package_cache() {
     local packages="$dir/configuration/packages.json"
     [ -f "$packages" ] || return 0
 
+    # The file's shape, read off a real one rather than assumed:
+    #   {"installed": [{"package_id": "...", "version": "..."}], "cache": [...],
+    #    "cache_expire_time": "...", "version": 1}
+    # Only "installed" is what the user actually has; "cache" is the remote
+    # catalogue, which is not what anyone needs to reinstall.
     local names=""
     if command -v python3 &>/dev/null; then
-        names="$(python3 - "$packages" <<'PY' 2>/dev/null || true
+        names="$(python3 - "$packages" <<'PYPKG' 2>/dev/null || true
 import json, sys
 with open(sys.argv[1]) as fh:
     doc = json.load(fh)
-entries = doc if isinstance(doc, dict) else {}
-for key, value in sorted(entries.items()):
-    print(f"{key} {value}" if isinstance(value, str) else key)
-PY
+if isinstance(doc, dict):
+    for entry in doc.get("installed") or []:
+        if isinstance(entry, dict) and entry.get("package_id"):
+            print(entry["package_id"], entry.get("version", ""))
+        elif isinstance(entry, str):
+            print(entry)
+PYPKG
 )"
+    fi
+
+    # Fall back to grep whenever that produced nothing -- python3 missing, python3
+    # present but broken, or a file shaped differently than expected. This list is
+    # the only record of what to reinstall and it is about to be deleted, so it is
+    # worth a second attempt rather than a condition on why the first one failed.
+    if [ -z "$names" ]; then
+        names="$(grep -o '"package_id"[[:space:]]*:[[:space:]]*"[^"]*"' "$packages" 2>/dev/null \
+            | sed 's/.*"\([^"]*\)"$/\1/' || true)"
     fi
 
     if [ "$DRY_RUN" -eq 1 ]; then
