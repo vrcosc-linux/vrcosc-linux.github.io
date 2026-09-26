@@ -57,7 +57,7 @@ out="$(run_install --info)"
 assert_contains "$out" "Wine Processes In Prefix"
 
 it "the installer warns about a non-VRChat session but does not refuse"
-out="$(run_install --dry-run --skip-firewall)"
+out="$(run_install --dry-run --no-firewall)"
 assert_contains "$out" "already running in this prefix"
 
 it "detects a holder that spells WINEPREFIX with a trailing slash, as Proton does"
@@ -70,13 +70,13 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
     grep -qzF "WINEPREFIX=$PREFIX/pfx/" "/proc/$HOLDER_PID/environ" 2>/dev/null && break
     sleep 0.2
 done
-out="$(run_install --dry-run --skip-firewall)"
+out="$(run_install --dry-run --no-firewall)"
 assert_contains "$out" "already running in this prefix"
 
 stop_holder
 
 it "says nothing about a busy prefix once it is free"
-out="$(run_install --dry-run --skip-firewall)"
+out="$(run_install --dry-run --no-firewall)"
 assert_not_contains "$out" "already running in this prefix"
 
 summarise

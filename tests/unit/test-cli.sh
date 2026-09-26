@@ -34,8 +34,11 @@ it "--help exits successfully and documents --runtime"
 out="$(run_install --help)"; rc=$?
 assert_contains "$out$rc" "--runtime <MODE>"
 
-it "--help documents that launch.exe patching is opt-in"
-assert_contains "$out" "--patch"
+it "--help documents how to refuse the launch.exe patch"
+assert_contains "$out" "--no-patch"
+
+it "--help documents the firewall flag under its current name"
+assert_contains "$out" "--no-firewall"
 
 it "rejects an unknown --runtime value"
 out="$(run_install --runtime nonsense)"; rc=$?
@@ -71,7 +74,7 @@ it "--info reports host mode as the working one on such a host"
 assert_contains "$out" "Runtime [host     ]"
 
 it "--dry-run writes no launcher"
-run_install --dry-run --skip-firewall >/dev/null
+run_install --dry-run --no-firewall >/dev/null
 launcher_exists=0
 [ -e "$WORK/home/.local/bin/vrcosc" ] && launcher_exists=1
 assert_eq "0" "$launcher_exists"
@@ -87,11 +90,24 @@ it "--dry-run survives with no network at all"
 out="$(env -i HOME="$WORK/home" PATH="$WORK/bin:/usr/bin:/bin" TERM=dumb \
     FAKE_PT_LOG="$WORK/pt.log" http_proxy=http://127.0.0.1:9 \
     https_proxy=http://127.0.0.1:9 \
-    bash "$INSTALL_SH" --prefix "$PREFIX" --dry-run --skip-firewall 2>&1)"
+    bash "$INSTALL_SH" --prefix "$PREFIX" --dry-run --no-firewall 2>&1)"
 rc=$?
 assert_ok $rc
 
 it "--dry-run says why it skipped the download when offline"
 assert_contains "$out" "Dry run: could not reach"
+
+# --- --no-firewall still reports ----------------------------------------------
+# Refusing to change the firewall is not the same as refusing to look at it: a
+# blocked 9001 looks exactly like VRCOSC not working.
+it "--no-firewall still inspects the firewall"
+out="$(run_install --dry-run --no-firewall)"
+assert_contains "$out" "Checking firewall configuration"
+
+it "and says it is adding nothing"
+assert_contains "$out" "Not adding any firewall rules"
+
+it "and reports what it found"
+assert_contains "$out" "9001/udp"
 
 summarise

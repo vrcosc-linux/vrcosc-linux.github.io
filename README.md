@@ -33,11 +33,11 @@ This installer configures VRCOSC to run seamlessly by:
    reinstall the same version — useful if you build VRCOSC yourself ahead of the
    published release. `-f/--force` overrides.
 5. **Configuring firewall rules** for OSC/OSCQuery ports (9000, 9001, 5353 UDP).
-6. **Optionally patching VRChat's `launch.exe` with a Linux IPC Named-Pipe Bridge** (`--patch`):
+6. **Patching VRChat's `launch.exe` with a Linux IPC Named-Pipe Bridge** (refuse with `--no-patch`):
    - VRChat ships a Windows launcher (`launch.exe`) that fails under Proton when companion tools (like VRCX or external launchers) request in-game world/instance navigation via `\\.\pipe\VRChatURLLaunchPipe`.
-   - This one is off by default, because it replaces a file inside VRChat's own install directory. Everything else works without it; only `vrchat://` navigation needs it.
+   - This replaces a file inside VRChat's own install directory, so `--no-patch` turns it off. Everything else works without it; only `vrchat://` navigation needs it.
    - The installer creates a read-only backup (`launch.org.exe`, `chmod 444`) and places a drop-in C# replacement bridge (`launch.exe`, `chmod 555`). The bridge binary ships in `bin/`; a piped install, which has no script directory, downloads it instead and caches it under `~/.local/share/vrcosc-linux`.
-   - Steam restores the stock `launch.exe` on game updates and file validation, so when you have opted in, the `vrcosc` launcher re-applies the patch before every session rather than leaving it to decay until the next install.
+   - Steam restores the stock `launch.exe` on game updates and file validation, so the `vrcosc` launcher re-applies the patch before every session rather than leaving it to decay until the next install.
    - The bridge writes to VRChat's named pipe to open in-game world menus in real
      time, falling back to the original binary if VRChat isn't running. Wine named
      pipes belong to a single wine session, so this only works from inside VRChat's
@@ -118,8 +118,8 @@ bash install.sh [OPTIONS]
 | `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |
 | `--purge` | Also delete VRCOSC's settings, profiles and logs for the selected `--branch`, for every user in the prefix. Use with `--uninstall` to remove the binaries too, or on its own to delete only settings; it never installs anything. If the config directory is a symlink, the target is deleted, so check `--purge --dry-run` first |
 | `--dry-run` | Simulate actions without modifying files or installing runtimes. Honoured by every mode, including `--uninstall` and `--purge` |
-| `--skip-firewall` | Skip firewall inspection and rule generation |
-| `--patch` | Replace VRChat's `launch.exe` with the IPC bridge, enabling `vrchat://` navigation. Off by default, since it modifies VRChat's install directory. `--path` is accepted as an alias |
+| `--no-firewall` | Inspect the firewall and report what it finds for ports 9000, 9001 and 5353, but add no rules |
+| `--no-patch` | Leave VRChat's `launch.exe` alone. The bridge is patched in by default; without it everything works except `vrchat://` navigation from VRCOSC and companion tools |
 | `--prefix <PATH>` | Explicitly supply your custom VRChat compatdata/438100 path |
 | `--runtime <MODE>` | How wine is invoked: `auto` (default, probes and picks a working mode), `no-bwrap`, `host` (no Steam Runtime), `container` (Steam Runtime with bwrap) |
 | `-h, --help` | Show command usage and options |
@@ -190,11 +190,12 @@ import.**
 Modules built against a beta SDK are published as pre-releases, and VRCOSC hides
 pre-releases unless **Allow Pre-Release Packages** is enabled in Settings. A
 stable-built module will not load on beta, so until that setting is on the list
-looks normal and nothing works.
+looks normal and nothing works. `--branch beta` turns the setting on for you; if
+you enabled beta some other way, turn it on yourself.
 
 **`vrchat://` links and in-game navigation from VRCOSC do nothing.**
-The `launch.exe` bridge is not installed. It is opt-in: rerun the installer with
-`--patch`. `--info` shows whether the bridge is in place.
+The `launch.exe` bridge is not installed. Rerun the installer without
+`--no-patch`; `--info` shows whether the bridge is in place.
 
 **VRChat and VRCOSC seem to interfere with each other.**
 Start VRChat first and let it finish loading, then start VRCOSC. `--info` shows

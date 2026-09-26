@@ -107,7 +107,7 @@ bash install.sh --info --prefix "\$PREFIX" | tail -n 30
 
 echo ""
 echo "--- install.sh --dry-run"
-bash install.sh --dry-run --skip-firewall --prefix "\$PREFIX" >/dev/null
+bash install.sh --dry-run --no-firewall --prefix "\$PREFIX" >/dev/null
 test ! -e "\$HOME/.local/bin/vrcosc" || { echo "FAIL: --dry-run created a launcher"; exit 1; }
 echo "OK: --dry-run wrote nothing"
 
@@ -116,7 +116,7 @@ if [ "$ONLINE" = "1" ]; then
     echo "--- install.sh (full, real downloads, fake wine)"
     export FAKE_PT_INSTALLS_RUNTIME=auto
     install_rc=0
-    bash install.sh --skip-firewall --prefix "\$PREFIX" --runtime host \
+    bash install.sh --no-firewall --prefix "\$PREFIX" --runtime host \
         > "\$HOME/install.log" 2>&1 || install_rc=\$?
     cat "\$HOME/install.log"
 

@@ -31,8 +31,8 @@ UNINSTALL_MODE=0
 BACKUP_MODE=0
 INFO_MODE=0
 DRY_RUN=0
-SKIP_FIREWALL=0
-PATCH_LAUNCH=0            # patching VRChat's launch.exe is opt-in; see --patch
+NO_FIREWALL=0
+PATCH_LAUNCH=1            # patching VRChat's launch.exe; refuse it with --no-patch
 PURGE_MODE=0              # delete settings and profiles as well; see --purge
 VRC_COMPATDATA=""
 RUNTIME_MODE="auto"        # auto | no-bwrap | host | container
@@ -265,11 +265,10 @@ print_usage() {
     echo "                            too, or on its own to delete only settings. Installs"
     echo "                            nothing. Follows the config directory if it is a symlink."
     echo "      --dry-run             Simulate actions without writing files or running installers"
-    echo "      --skip-firewall       Do not attempt firewall port configuration"
-    echo "      --patch               Replace VRChat's launch.exe with the Linux IPC bridge,"
-    echo "                            enabling vrchat:// navigation from VRCOSC and other tools."
-    echo "                            Off by default: it modifies files in VRChat's own install"
-    echo "                            directory. (--path is accepted as an alias.)"
+    echo "      --no-firewall         Inspect firewall rules but add none"
+    echo "      --no-patch            Leave VRChat's launch.exe alone. The bridge is what makes"
+    echo "                            vrchat:// navigation work from VRCOSC and companion tools;"
+    echo "                            without it everything else still works."
     echo "      --prefix <PATH>       Explicitly specify the VRChat compatdata/438100 folder"
     echo "      --runtime <MODE>      Steam Runtime mode for wine calls (default: auto)"
     echo "                              auto       probe modes below and use the first clean one"
@@ -336,11 +335,17 @@ parse_arguments() {
                 DRY_RUN=1
                 shift
                 ;;
-            --skip-firewall)
-                SKIP_FIREWALL=1
+            --no-firewall|--skip-firewall)
+                NO_FIREWALL=1
+                shift
+                ;;
+            --no-patch)
+                PATCH_LAUNCH=0
                 shift
                 ;;
             --patch|--path)
+                # Accepted because it was briefly the documented spelling; patching is
+                # the default now, so this only states it explicitly.
                 PATCH_LAUNCH=1
                 shift
                 ;;
@@ -429,6 +434,61 @@ print_install_hint() {
         echo -e "  ${CYAN}pipx install protontricks${NC}"
         echo -e "  Bazzite and SteamOS ship it already; on SteamOS prefer the Flatpak."
     fi
+}
+
+# VRCOSC hides pre-release packages unless this is on, and every module built for
+# a beta SDK is published as a pre-release. Installing beta without it leaves a
+# Packages tab that lists only stable builds, which then fail to import -- the
+# failure looks like a broken install rather than a hidden setting.
+enable_prerelease_packages() {
+    local dirs d cfg
+    dirs="$(get_vrcosc_config_dirs)"
+
+    if [ -z "$dirs" ]; then
+        log_warn "No settings file yet; enable 'Allow Pre-Release Packages' in VRCOSC's settings"
+        log_warn "after its first run, or beta will only offer stable module builds."
+        return 0
+    fi
+
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        cfg="$d/configuration/settings.json"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_info "Would enable pre-release packages in $cfg"
+            continue
+        fi
+        mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
+
+        if [ ! -f "$cfg" ]; then
+            # VRCOSC merges the file over its defaults, so a file carrying only this
+            # one setting is enough. version must match, or the app ignores the file
+            # and rewrites it -- in which case the setting is simply lost, no worse
+            # than not writing it at all.
+            printf '{\n  "settings": {\n    "AllowPreReleasePackages": true\n  },\n  "metadata": {},\n  "version": 1\n}\n' > "$cfg"
+            log_success "Enabled pre-release packages for beta ($cfg)."
+            continue
+        fi
+
+        if command -v python3 &>/dev/null; then
+            python3 - "$cfg" <<'PYEOF' 2>/dev/null && log_success "Enabled pre-release packages for beta ($cfg)." && continue
+import json, sys
+p = sys.argv[1]
+with open(p) as fh:
+    d = json.load(fh)
+d.setdefault("settings", {})["AllowPreReleasePackages"] = True
+with open(p, "w") as fh:
+    json.dump(d, fh, indent=2)
+PYEOF
+        fi
+
+        # Without python3, flip the boolean in place if it is there.
+        if grep -q '"AllowPreReleasePackages"' "$cfg"; then
+            sed -i 's/"AllowPreReleasePackages": *false/"AllowPreReleasePackages": true/' "$cfg"
+            log_success "Enabled pre-release packages for beta ($cfg)."
+        else
+            log_warn "Could not edit $cfg; enable 'Allow Pre-Release Packages' in VRCOSC's settings."
+        fi
+    done <<< "$dirs"
 }
 
 check_dependencies() {
@@ -1003,7 +1063,7 @@ show_diagnostics() {
     if [ -n "$source_bridge" ] && files_identical "$source_bridge" "$target_launch"; then
         bridge_status="${GREEN}Patched (Linux IPC Named-Pipe Bridge)${NC}"
     elif [ -f "$target_launch" ]; then
-        bridge_status="${YELLOW}Stock launch.exe (Unpatched; enable with --patch)${NC}"
+        bridge_status="${YELLOW}Stock launch.exe (Unpatched)${NC}"
     fi
     echo -e "  * VRChat Launch Bridge:    ${bridge_status}"
 
@@ -1366,13 +1426,68 @@ install_vrcosc() {
     log_success "VRCOSC files extracted successfully."
 }
 
+# Report whatever the firewall already says about the OSC ports. This is the whole
+# of --no-firewall's job: someone who does not want the installer touching their
+# firewall still needs to know whether the ports are open, because a blocked 9001
+# looks exactly like VRCOSC not working.
+report_firewall_rules() {
+    local found=0 out=""
+
+    if command -v firewall-cmd &>/dev/null; then
+        out="$(sudo -n firewall-cmd --list-all 2>/dev/null || firewall-cmd --list-all 2>/dev/null || true)"
+        if [ -n "$out" ]; then
+            local zone ports services
+            zone="$(head -n 1 <<< "$out" | awk '{print $1}')"
+            ports="$(grep -E '^\s*ports:' <<< "$out" | sed 's/^\s*ports:\s*//')"
+            services="$(grep -E '^\s*services:' <<< "$out" | sed 's/^\s*services:\s*//')"
+            echo -e "  * firewalld zone:      ${CYAN}${zone:-unknown}${NC}"
+            echo -e "  * open udp ports:      ${CYAN}${ports:-none}${NC}"
+            [ -n "$services" ] && echo -e "  * services:            ${CYAN}${services}${NC}"
+            local p
+            for p in 9000 9001 5353; do
+                if grep -qE "(^|[[:space:]])${p}/udp" <<< "$ports"; then
+                    echo -e "  * ${p}/udp:            ${GREEN}explicitly allowed${NC}"
+                elif grep -qE '[0-9]+-[0-9]+/udp' <<< "$ports"; then
+                    echo -e "  * ${p}/udp:            ${CYAN}may be covered by a port range above${NC}"
+                else
+                    echo -e "  * ${p}/udp:            ${YELLOW}not listed${NC}"
+                fi
+            done
+            found=1
+        fi
+    fi
+
+    if [ "$found" -eq 0 ] && command -v ufw &>/dev/null; then
+        out="$(sudo -n ufw status 2>/dev/null || true)"
+        if [ -n "$out" ]; then
+            echo -e "  * ufw:                 ${CYAN}$(head -n 1 <<< "$out")${NC}"
+            grep -E '9000|9001|5353' <<< "$out" | sed 's/^/      /' || echo -e "      ${YELLOW}no rules for 9000, 9001 or 5353${NC}"
+            found=1
+        fi
+    fi
+
+    if [ "$found" -eq 0 ] && command -v iptables &>/dev/null; then
+        out="$(sudo -n iptables -S INPUT 2>/dev/null | grep -E 'dport (9000|9001|5353)' || true)"
+        if [ -n "$out" ]; then
+            echo "$out" | sed 's/^/      /'
+        else
+            echo -e "      ${YELLOW}no iptables INPUT rules for 9000, 9001 or 5353${NC}"
+        fi
+        found=1
+    fi
+
+    [ "$found" -eq 1 ] || echo -e "  * ${YELLOW}no firewall tool found to inspect${NC}"
+}
+
 configure_firewall() {
-    if [ "$SKIP_FIREWALL" -eq 1 ]; then
-        log_info "Skipping firewall configuration (--skip-firewall)."
+    log_info "Checking firewall configuration for OSC and OSCQuery mDNS ports (9000/9001/5353 UDP)..."
+    report_firewall_rules
+
+    if [ "$NO_FIREWALL" -eq 1 ]; then
+        log_info "Not adding any firewall rules (--no-firewall)."
         return 0
     fi
 
-    log_info "Checking firewall configuration for OSC and OSCQuery mDNS ports (9000/9001/5353 UDP)..."
     [ "$DRY_RUN" -eq 1 ] && return 0
 
     local applied=0
@@ -1439,11 +1554,11 @@ stage_launch_bridge() {
 }
 
 patch_vrchat_launch_bridge() {
-    # Opt-in: this writes into VRChat's own install directory, which not everyone
-    # wants touched, and the game works fine without it -- only vrchat://
-    # navigation from VRCOSC and companion tools depends on the bridge.
+    # Refusable: this writes into VRChat's own install directory. The game works
+    # without it; only vrchat:// navigation from VRCOSC and companion tools needs
+    # the bridge.
     if [ "$PATCH_LAUNCH" -ne 1 ]; then
-        log_info "Leaving VRChat's launch.exe alone (pass --patch to install the IPC bridge)."
+        log_info "Leaving VRChat's launch.exe alone (--no-patch)."
         return 0
     fi
     log_info "Checking VRChat launch.exe for Linux IPC named-pipe bridge patch..."
@@ -1650,10 +1765,9 @@ EOF_DESKTOP
     local vrcosc_dir="$(get_vrcosc_install_dir)"
     log_success "=== VRCOSC Setup Complete! ==="
     if [ "$VRCOSC_BRANCH" = "beta" ]; then
-        echo -e "${YELLOW}Beta note:${NC} module packages built for a beta SDK are published as"
-        echo -e "  pre-releases, and VRCOSC hides those unless ${CYAN}Allow Pre-Release Packages${NC} is"
-        echo -e "  enabled in Settings. Without it the Packages tab offers only stable builds,"
-        echo -e "  which will not load on beta. Beta also shares its settings with live."
+        echo -e "${YELLOW}Beta note:${NC} module packages for a beta SDK ship as pre-releases, which"
+        echo -e "  VRCOSC hides unless ${CYAN}Allow Pre-Release Packages${NC} is on; the installer has"
+        echo -e "  turned it on for you. Beta also shares its settings with live."
     fi
     echo -e "You can launch VRCOSC from your application menu, or run '${BLUE}$(basename "$launch_script")${NC}' in the terminal."
     echo -e "\n${BLUE}VRCOSC Directory Paths:${NC}"
@@ -1842,6 +1956,7 @@ main() {
     apply_wpf_registry_fix
     install_vrcosc
     install_dotnet_runtime
+    [ "$VRCOSC_BRANCH" = "beta" ] && enable_prerelease_packages
     configure_firewall
     install_application_icon
     patch_vrchat_launch_bridge
