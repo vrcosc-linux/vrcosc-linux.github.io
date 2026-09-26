@@ -50,8 +50,12 @@ This installer configures VRCOSC to run seamlessly by:
    the game as permanently closed and every VRChat-dependent feature stays inert.
 
 Switching between `live` and `beta` needs more than swapping the binaries,
-because the two share their settings, profiles and packages. What has to change,
-what the installer does today and what is still manual is written down in
+because the two share their settings, profiles and packages. The installer sets
+the update channel to match `--branch`, turns pre-release packages on for beta
+and off again when switching back to live, and on a channel change lists your
+installed modules before clearing the now-stale package records. Reinstalling
+those modules from the Packages tab is the one manual step left; the reasoning,
+the evidence and what is still open are in
 [docs/channel-switching.md](docs/channel-switching.md).
 
 Steps 3, 6 and 8 exist because of measured behaviour, not guesswork — the
@@ -197,6 +201,15 @@ pre-releases unless **Allow Pre-Release Packages** is enabled in Settings. A
 stable-built module will not load on beta, so until that setting is on the list
 looks normal and nothing works. `--branch beta` turns the setting on for you; if
 you enabled beta some other way, turn it on yourself.
+
+**After switching channels, modules are gone from the Packages tab.**
+Expected. Their recorded versions belonged to the other channel's SDK line, so
+the installer cleared them rather than leave entries whose DLLs cannot load. It
+printed the list before doing so — reinstall those from the Packages tab.
+
+**The installer says it will not write settings because VRCOSC is running.**
+VRCOSC rewrites its settings file when it exits, so anything written underneath
+it would be discarded. Close VRCOSC and run the installer again.
 
 **`vrchat://` links and in-game navigation from VRCOSC do nothing.**
 The `launch.exe` bridge is not installed. Rerun the installer without

@@ -1,8 +1,10 @@
 # Switching between live and beta
 
-Notes for making `--branch live` ↔ `--branch beta` a clean operation. Written
-2026-09-26 after switching a real install back and forth several times; each
-item below is something that actually went wrong, not a precaution.
+What `--branch live` ↔ `--branch beta` has to do to be a clean operation, and
+what the installer does about it. Written 2026-09-26 after switching a real
+install back and forth several times; each item below is something that actually
+went wrong, not a precaution. Items 1-3 and 5 are automated as of
+`apply_channel_settings`; item 4 is not, and cannot be without a design change.
 
 ## Why switching is not just swapping the binaries
 
@@ -35,9 +37,9 @@ This is not hypothetical: it is the failure documented in the machine's old
 hand-written `vrcosc-beta` launcher, where a beta install self-updated to the
 stable release and its modules stopped loading.
 
-**Automate:** set `settings.UpdateChannel` to match `--branch` on every install.
-Right now the installer sets neither, so a beta install sits there claiming to
-be on the live channel.
+**Automated.** The installer writes `settings.UpdateChannel` to match `--branch`
+on every install. Before that it wrote neither, so a beta install sat there
+claiming to be on the live channel.
 
 ### 2. Pre-release visibility, both directions
 
@@ -45,9 +47,11 @@ be on the live channel.
 `settings.AllowPreReleasePackages` is true. Module builds for a beta SDK are
 published as pre-releases, so beta needs it on.
 
-The installer turns it on for `--branch beta` (done). **It never turns it off
-again**, so switching back to live leaves live offering beta-SDK packages, which
-cannot load there. Switching to live should set it false.
+**Automated, both directions.** Beta sets it true. Live sets it false *only when
+the channel actually changed* -- on a plain live install the setting may have
+been turned on deliberately, and overriding that on every run is not the
+installer's call. Before this, switching back to live left live offering
+beta-SDK packages, which cannot load there.
 
 ### 3. The installed-package records, which are now wrong
 
@@ -59,7 +63,9 @@ Deleting `configuration/packages.json` while the app is closed forces a clean
 rebuild; measured on this machine it went from 14 stale entries to a correct
 re-resolved set, and the cache then offered the right builds for the channel.
 
-**Automate:** invalidate it on a channel change, not on every install.
+**Automated.** `packages.json` is deleted when the configured channel differs
+from the branch being installed, and only then; re-running the same channel
+leaves it alone.
 
 ### 4. The module DLLs themselves
 
@@ -77,6 +83,11 @@ re-download per channel, or keep a per-channel copy of `packages/remote` plus
 `packages.json` and swap them on switch. The second is the only version of this
 that makes switching instant.
 
+**Not automated**, and the one item here that needs a decision rather than code.
+Clearing `packages.json` (item 3) makes the app re-resolve correctly, but the
+user still has to press install in the Packages tab. Item 5 exists to make that
+step obvious rather than to avoid it.
+
 ### 5. What the profiles expect
 
 ChatBox clips reference module variables. If the modules those clips came from
@@ -84,8 +95,9 @@ are not installed, the app opens with *"ChatBox could not load all data"* and
 the log says `ChatBox could not validate all data`. Nothing is broken and
 nothing is lost; the clips resolve again once the modules are back.
 
-**Automate:** after a switch, print the package list read out of the previous
-`packages.json` so the user knows exactly what to reinstall.
+**Automated.** The package list is read out of `packages.json` and printed
+before the file is deleted, so the only record of what was installed survives
+the thing that invalidates it.
 
 ## Not yet confirmed
 
@@ -100,12 +112,21 @@ nothing is lost; the clips resolve again once the modules are back.
   install directory from `VRCOSC.runtimeconfig.json`, so it is handled either
   way, but both channels wanted 10.0 when this was written.
 
-## Until it is automated
+## Switching, now
 
-1. Close VRCOSC.
-2. Run the installer with the channel you want.
-3. Set **Update Channel** in VRCOSC's settings to match that channel.
-4. Set **Allow Pre-Release Packages** on for beta, off for live.
-5. Delete `configuration/packages.json`.
-6. Start VRCOSC and reinstall your modules from the Packages tab; with the
-   setting from step 4, the versions offered are the ones that will load.
+1. Close VRCOSC. The app rewrites `settings.json` on exit, so anything written
+   underneath a running instance is lost.
+2. Run the installer with the channel you want. It sets the update channel and
+   pre-release visibility, and on a channel change it lists your installed
+   packages and then clears the stale records.
+3. Start VRCOSC and reinstall the modules it listed, from the Packages tab. The
+   versions offered are now the ones that will load.
+
+If you forget step 1 the installer notices: it checks the prefix for a running
+VRCOSC and, rather than writing settings that the app would overwrite on exit,
+says so and leaves them alone.
+
+## Still open
+
+- Per-channel `packages/remote` copies, so a switch does not need a manual
+  reinstall at all (item 4). Everything else is handled.

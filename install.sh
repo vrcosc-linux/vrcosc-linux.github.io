@@ -91,6 +91,11 @@ get_vrcosc_config_dirs() {
     for d in "$VRC_COMPATDATA/pfx/drive_c/users"/*/AppData/Roaming/"$leaf"; do
         [ -e "$d" ] && echo "$d"
     done
+
+    # Finding nothing is an answer, not a failure. Without this the final -e test
+    # decides the exit status and trips the ERR trap in any caller that is not
+    # already inside a condition.
+    return 0
 }
 
 get_vrchat_game_dir() {
@@ -436,59 +441,203 @@ print_install_hint() {
     fi
 }
 
-# VRCOSC hides pre-release packages unless this is on, and every module built for
-# a beta SDK is published as a pre-release. Installing beta without it leaves a
-# Packages tab that lists only stable builds, which then fail to import -- the
-# failure looks like a broken install rather than a hidden setting.
-enable_prerelease_packages() {
-    local dirs d cfg
+# --- Release channel settings ---
+#
+# Only the install directory is per-channel; settings, profiles and package
+# records are shared (AppManager.APP_NAME is "VRCOSC" for every Release build).
+# So installing the other channel hands the new app the old one's state, and
+# three parts of that state are wrong for it. See docs/channel-switching.md.
+
+# UpdateChannel as VRCOSC's enum stores it (VRCOSC.App/Updater/UpdateChannel.cs).
+channel_value_for_branch() {
+    [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && echo 1 || echo 0
+}
+
+# The channel the existing settings claim, or empty when there is no settings
+# file yet -- which is a first install, not a switch.
+read_configured_channel() {
+    local cfg="$1"
+    [ -f "$cfg" ] || return 0
+
+    if command -v python3 &>/dev/null; then
+        python3 - "$cfg" <<'PY' 2>/dev/null && return 0
+import json, sys
+with open(sys.argv[1]) as fh:
+    v = json.load(fh).get("settings", {}).get("UpdateChannel")
+if isinstance(v, bool) or not isinstance(v, int):
+    sys.exit(1)
+print(v)
+PY
+    fi
+
+    grep -oE '"UpdateChannel"[[:space:]]*:[[:space:]]*[0-9]+' "$cfg" 2>/dev/null \
+        | head -n 1 | grep -oE '[0-9]+$' || true
+}
+
+# Writes UpdateChannel, and AllowPreReleasePackages when a value is given.
+# VRCOSC merges the file over its defaults, so a file carrying only these keys
+# is enough -- but `version` must match or the app ignores the file entirely.
+write_channel_settings() {
+    local cfg="$1"
+    local channel="$2"
+    local prerelease="${3:-}"
+
+    mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
+
+    if [ ! -f "$cfg" ]; then
+        if [ -n "$prerelease" ]; then
+            printf '{\n  "settings": {\n    "UpdateChannel": %s,\n    "AllowPreReleasePackages": %s\n  },\n  "metadata": {},\n  "version": 1\n}\n' \
+                "$channel" "$prerelease" > "$cfg"
+        else
+            printf '{\n  "settings": {\n    "UpdateChannel": %s\n  },\n  "metadata": {},\n  "version": 1\n}\n' \
+                "$channel" > "$cfg"
+        fi
+        return 0
+    fi
+
+    if command -v python3 &>/dev/null; then
+        python3 - "$cfg" "$channel" "$prerelease" <<'PY' 2>/dev/null && return 0
+import json, sys
+path, channel, prerelease = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+with open(path) as fh:
+    doc = json.load(fh)
+settings = doc.setdefault("settings", {})
+settings["UpdateChannel"] = channel
+if prerelease:
+    settings["AllowPreReleasePackages"] = prerelease == "true"
+with open(path, "w") as fh:
+    json.dump(doc, fh, indent=2)
+PY
+    fi
+
+    # Without python3 the keys can only be edited where they already exist.
+    local edited=0
+    if grep -q '"UpdateChannel"' "$cfg"; then
+        sed -i "s/\"UpdateChannel\"[[:space:]]*:[[:space:]]*[0-9]*/\"UpdateChannel\": $channel/" "$cfg"
+        edited=1
+    fi
+    if [ -n "$prerelease" ] && grep -q '"AllowPreReleasePackages"' "$cfg"; then
+        sed -i "s/\"AllowPreReleasePackages\"[[:space:]]*:[[:space:]]*\(true\|false\)/\"AllowPreReleasePackages\": $prerelease/" "$cfg"
+        edited=1
+    fi
+    [ "$edited" -eq 1 ]
+}
+
+# A package's recorded version belongs to the SDK line of the channel that
+# installed it, so after a switch packages.json reports modules as installed
+# whose DLLs will not load. Deleting it forces a clean re-resolve; the names are
+# printed first because that list is the only record of what to reinstall.
+invalidate_package_cache() {
+    local dir="$1"
+    local packages="$dir/configuration/packages.json"
+    [ -f "$packages" ] || return 0
+
+    local names=""
+    if command -v python3 &>/dev/null; then
+        names="$(python3 - "$packages" <<'PY' 2>/dev/null || true
+import json, sys
+with open(sys.argv[1]) as fh:
+    doc = json.load(fh)
+entries = doc if isinstance(doc, dict) else {}
+for key, value in sorted(entries.items()):
+    print(f"{key} {value}" if isinstance(value, str) else key)
+PY
+)"
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log_info "Would delete $packages (channel changed)"
+        return 0
+    fi
+
+    if [ -n "$names" ]; then
+        log_warn "These packages were installed for the other channel and must be"
+        log_warn "reinstalled from the Packages tab:"
+        local line
+        while IFS= read -r line; do
+            [ -n "$line" ] && echo "  * $line"
+        done <<< "$names"
+    fi
+
+    rm -f "$packages"
+    log_success "Cleared the package cache so it re-resolves for this channel."
+}
+
+# True when a VRCOSC process is holding the prefix. VRCOSC rewrites settings.json
+# from memory when it exits, so anything written underneath a running instance is
+# silently discarded -- the settings would look applied here and be gone by the
+# time the user looked.
+vrcosc_is_running() {
+    get_prefix_holders | awk '{print $2}' | grep -qi '^VRCOSC'
+}
+
+# Brings the shared settings in line with the branch being installed.
+apply_channel_settings() {
+    local dirs d cfg channel previous prerelease switched
     dirs="$(get_vrcosc_config_dirs)"
+    channel="$(channel_value_for_branch "$VRCOSC_BRANCH")"
+
+    if vrcosc_is_running; then
+        log_warn "VRCOSC is running; it rewrites its settings on exit, so anything"
+        log_warn "written now would be discarded. Close it and run the installer again"
+        log_warn "to have the update channel set for you, or set it yourself in Settings."
+        return 0
+    fi
 
     if [ -z "$dirs" ]; then
-        log_warn "No settings file yet; enable 'Allow Pre-Release Packages' in VRCOSC's settings"
-        log_warn "after its first run, or beta will only offer stable module builds."
+        if [ "$VRCOSC_BRANCH" = "beta" ]; then
+            log_warn "No settings file yet; enable 'Allow Pre-Release Packages' and set the"
+            log_warn "update channel to Beta in VRCOSC's settings after its first run."
+        fi
         return 0
     fi
 
     while IFS= read -r d; do
         [ -n "$d" ] || continue
         cfg="$d/configuration/settings.json"
+        previous="$(read_configured_channel "$cfg")"
+
+        switched=0
+        if [ -n "$previous" ] && [ "$previous" != "$channel" ]; then
+            switched=1
+        fi
+
+        # Beta needs pre-releases visible, since every module built against a beta
+        # SDK ships as one. Live only has them forced off when switching back from
+        # beta: on a plain live install the setting may have been turned on
+        # deliberately, and overriding that on every run is not ours to do.
+        prerelease=""
+        if [ "$VRCOSC_BRANCH" = "beta" ]; then
+            prerelease="true"
+        elif [ "$switched" -eq 1 ]; then
+            prerelease="false"
+        fi
+
         if [ "$DRY_RUN" -eq 1 ]; then
-            log_info "Would enable pre-release packages in $cfg"
-            continue
-        fi
-        mkdir -p "$(dirname "$cfg")" 2>/dev/null || true
-
-        if [ ! -f "$cfg" ]; then
-            # VRCOSC merges the file over its defaults, so a file carrying only this
-            # one setting is enough. version must match, or the app ignores the file
-            # and rewrites it -- in which case the setting is simply lost, no worse
-            # than not writing it at all.
-            printf '{\n  "settings": {\n    "AllowPreReleasePackages": true\n  },\n  "metadata": {},\n  "version": 1\n}\n' > "$cfg"
-            log_success "Enabled pre-release packages for beta ($cfg)."
-            continue
-        fi
-
-        if command -v python3 &>/dev/null; then
-            python3 - "$cfg" <<'PYEOF' 2>/dev/null && log_success "Enabled pre-release packages for beta ($cfg)." && continue
-import json, sys
-p = sys.argv[1]
-with open(p) as fh:
-    d = json.load(fh)
-d.setdefault("settings", {})["AllowPreReleasePackages"] = True
-with open(p, "w") as fh:
-    json.dump(d, fh, indent=2)
-PYEOF
-        fi
-
-        # Without python3, flip the boolean in place if it is there.
-        if grep -q '"AllowPreReleasePackages"' "$cfg"; then
-            sed -i 's/"AllowPreReleasePackages": *false/"AllowPreReleasePackages": true/' "$cfg"
-            log_success "Enabled pre-release packages for beta ($cfg)."
+            log_info "Would set update channel to $VRCOSC_BRANCH in $cfg"
+            if [ -n "$prerelease" ]; then
+                log_info "Would set pre-release packages to $prerelease in $cfg"
+            fi
+        elif write_channel_settings "$cfg" "$channel" "$prerelease"; then
+            log_success "Update channel set to $VRCOSC_BRANCH ($cfg)."
+            if [ "$prerelease" = "true" ]; then
+                log_success "Enabled pre-release packages for beta ($cfg)."
+            elif [ "$prerelease" = "false" ]; then
+                log_success "Disabled pre-release packages for live ($cfg)."
+            fi
         else
-            log_warn "Could not edit $cfg; enable 'Allow Pre-Release Packages' in VRCOSC's settings."
+            log_warn "Could not edit $cfg; set 'Update Channel' to $VRCOSC_BRANCH in VRCOSC's settings."
+        fi
+
+        if [ "$switched" -eq 1 ]; then
+            log_warn "Channel changed; the installed packages belong to the other channel."
+            invalidate_package_cache "$d"
         fi
     done <<< "$dirs"
+
+    # The loop's last test decides the exit status otherwise, and a false one
+    # there trips the ERR trap and aborts the install.
+    return 0
 }
 
 check_dependencies() {
@@ -1767,7 +1916,8 @@ EOF_DESKTOP
     if [ "$VRCOSC_BRANCH" = "beta" ]; then
         echo -e "${YELLOW}Beta note:${NC} module packages for a beta SDK ship as pre-releases, which"
         echo -e "  VRCOSC hides unless ${CYAN}Allow Pre-Release Packages${NC} is on; the installer has"
-        echo -e "  turned it on for you. Beta also shares its settings with live."
+        echo -e "  turned it on for you, and set the update channel to Beta so the app does"
+        echo -e "  not replace itself with the stable build. Beta shares its settings with live."
     fi
     echo -e "You can launch VRCOSC from your application menu, or run '${BLUE}$(basename "$launch_script")${NC}' in the terminal."
     echo -e "\n${BLUE}VRCOSC Directory Paths:${NC}"
@@ -1956,7 +2106,7 @@ main() {
     apply_wpf_registry_fix
     install_vrcosc
     install_dotnet_runtime
-    [ "$VRCOSC_BRANCH" = "beta" ] && enable_prerelease_packages
+    apply_channel_settings
     configure_firewall
     install_application_icon
     patch_vrchat_launch_bridge
