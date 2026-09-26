@@ -445,7 +445,23 @@ assert_contains "$out" "Verify integrity of game files"
 it "and leaves launch.exe as it found it, rather than half-patching"
 assert_eq "MZ an older launch_bridge_ready build" "$(cat "$game_dir/launch.exe")"
 
+it "refreshes a backup that VRChat has since updated past"
+# Steam restores a NEW stock launch.exe on a game update. Keeping the old backup
+# would leave the bridge falling back to a launcher VRChat no longer ships.
+printf 'MZ stub launch.exe\n' > "$game_dir/launch.exe"
+rm -f "$game_dir/launch.org.exe"
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+chmod 755 "$game_dir/launch.exe"
+printf 'MZ stub launch.exe v2\n' > "$game_dir/launch.exe"
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+assert_eq "MZ stub launch.exe v2" "$(cat "$game_dir/launch.org.exe")"
+
+it "and leaves the backup alone when the bridge is simply already in place"
+PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1
+assert_eq "MZ stub launch.exe v2" "$(cat "$game_dir/launch.org.exe")"
+
 it "a stock launch.exe is still backed up normally"
+chmod 644 "$game_dir/launch.exe" 2>/dev/null || true
 printf 'MZ stub launch.exe\n' > "$game_dir/launch.exe"
 rm -f "$game_dir/launch.org.exe"
 PATH="$WORK/bin:$PATH" patch_vrchat_launch_bridge >/dev/null 2>&1

@@ -784,7 +784,11 @@ get_prefix_holders() {
         [ -r "$proc/environ" ] || continue
         # Proton exports "WINEPREFIX=<path>/" with a trailing slash while
         # protontricks exports it without, so both spellings must match.
-        tr '\0' '\n' < "$proc/environ" 2>/dev/null \
+        #
+        # cat, not a redirect: reading /proc/PID/environ needs PTRACE_MODE_READ, so
+        # [ -r ] can say yes and the open still fail with EACCES -- and a failing
+        # shell redirect prints its own error that no 2>/dev/null on tr can silence.
+        cat "$proc/environ" 2>/dev/null | tr '\0' '\n' \
             | grep -qxF -e "WINEPREFIX=$pfx" -e "WINEPREFIX=$pfx/" || continue
         pid="${proc#/proc/}"
         name="$(cat "$proc/comm" 2>/dev/null || true)"
@@ -883,9 +887,9 @@ find_vrchat_container_pid() {
     for proc in /proc/[0-9]*; do
         [ "$(cat "$proc/comm" 2>/dev/null)" = "VRChat.exe" ] || continue
         [ -r "$proc/environ" ] || continue
-        tr '\0' '\n' < "$proc/environ" 2>/dev/null \
+        cat "$proc/environ" 2>/dev/null | tr '\0' '\n' \
             | grep -qxF -e "WINEPREFIX=$pfx" -e "WINEPREFIX=$pfx/" || continue
-        tr '\0' '\n' < "$proc/environ" 2>/dev/null | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
+        cat "$proc/environ" 2>/dev/null | tr '\0' '\n' | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
         echo "${proc#/proc/}"
         return 0
     done
@@ -1378,14 +1382,74 @@ create_backup() {
     echo -e "  * ${CYAN}${archive_path}${NC}"
 }
 
+# The flatpak overrides this installer adds, each with the reason it is needed.
+# They are listed in one place because uninstall has to be able to take them back
+# off again, and because a sandbox escape is not something to grant silently.
+readonly -a PROTONTRICKS_OVERRIDES=(
+    # Steam libraries live wherever the user put them -- an external drive, a
+    # second NTFS mount -- and protontricks has to reach the prefix under
+    # whichever one holds VRChat. A narrower --filesystem would have to be
+    # recomputed per machine and would break the moment a library moved.
+    "--filesystem=host"
+    # VRCOSC's media module reads now-playing state over MPRIS. VRCOSC runs
+    # through protontricks, so the name has to be reachable from inside that
+    # sandbox or the module reports nothing playing.
+    "--talk-name=org.mpris.MediaPlayer2.*"
+    # This is what lets a flatpak call flatpak-spawn --host, i.e. run commands
+    # outside its sandbox. protontricks needs it to start Proton's own wine,
+    # which lives on the host. It is also, plainly, a sandbox escape.
+    "--talk-name=org.freedesktop.Flatpak"
+)
+
+# True when the protontricks we will actually invoke is the flatpak one. The
+# override only means anything then: it used to run whenever any flatpak matched
+# "protontricks" in a listing, including when the protontricks on PATH was pipx's.
+protontricks_is_flatpak() {
+    flatpak list --app 2>/dev/null | grep -q 'com\.github\.Matoking\.protontricks' || return 1
+    # A `protontricks` on PATH that is not a flatpak wrapper is the one that runs.
+    local bin
+    bin="$(command -v protontricks 2>/dev/null)" || return 0
+    grep -qi 'flatpak' "$bin" 2>/dev/null || [ -z "$bin" ]
+}
+
 configure_protontricks_permissions() {
-    if flatpak list 2>/dev/null | grep -q "protontricks"; then
-        log_info "Updating flatpak sandbox permissions for protontricks..."
-        [ "$DRY_RUN" -eq 1 ] && return 0
-        flatpak override --user --filesystem=host com.github.Matoking.protontricks || true
-        flatpak override --user --talk-name=org.mpris.MediaPlayer2.* com.github.Matoking.protontricks || true
-        flatpak override --user --talk-name=org.freedesktop.Flatpak com.github.Matoking.protontricks || true
-    fi
+    protontricks_is_flatpak || return 0
+
+    log_info "Granting flatpak permissions protontricks needs:"
+    local ov
+    for ov in "${PROTONTRICKS_OVERRIDES[@]}"; do
+        echo -e "  * ${CYAN}${ov}${NC}"
+    done
+    echo -e "  ${YELLOW}--talk-name=org.freedesktop.Flatpak lets protontricks run commands outside"
+    echo -e "  its sandbox; it needs that to start Proton's wine. --uninstall takes these"
+    echo -e "  back off again. See the README for why each one is here.${NC}"
+    [ "$DRY_RUN" -eq 1 ] && return 0
+
+    for ov in "${PROTONTRICKS_OVERRIDES[@]}"; do
+        flatpak override --user "$ov" com.github.Matoking.protontricks || true
+    done
+}
+
+# Takes the grants above back off. Only ours: --reset would also drop overrides
+# the user set themselves.
+revoke_protontricks_permissions() {
+    protontricks_is_flatpak || return 1
+
+    local ov revoked=0
+    for ov in "${PROTONTRICKS_OVERRIDES[@]}"; do
+        # "--nofilesystem=host" undoes "--filesystem=host"; a --talk-name is
+        # undone by --no-talk-name.
+        local undo="${ov/--filesystem=/--nofilesystem=}"
+        undo="${undo/--talk-name=/--no-talk-name=}"
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_info "Would revoke flatpak permission: $ov"
+        else
+            flatpak override --user "$undo" com.github.Matoking.protontricks 2>/dev/null || true
+        fi
+        revoked=1
+    done
+    [ "$revoked" -eq 1 ] && [ "$DRY_RUN" -ne 1 ] && log_success "Revoked the flatpak permissions this installer granted."
+    return 0
 }
 
 # True when the prefix registry already carries the patch, so a reinstall does
@@ -1684,6 +1748,21 @@ install_vrcosc() {
     log_success "VRCOSC files extracted successfully."
 }
 
+# Uninstall does not close the OSC ports. Removing a firewall rule this installer
+# may not have added, on a machine where something else may now depend on it, is
+# not a safe thing to do unprompted -- but leaving it unmentioned would make
+# "cleanly remove" untrue. So: say what is still open and how to close it.
+report_firewall_rules_on_uninstall() {
+    command -v firewall-cmd &>/dev/null || return 0
+    local out
+    out="$(sudo -n firewall-cmd --list-ports 2>/dev/null || firewall-cmd --list-ports 2>/dev/null || true)"
+    grep -qE '9000|9001|5353' <<< "$out" || return 0
+
+    log_warn "The OSC ports are still open in your firewall: $out"
+    log_warn "They are left alone because something else may now rely on them. To close:"
+    echo -e "  ${CYAN}sudo firewall-cmd --permanent --remove-port=9000-9001/udp --remove-port=5353/udp && sudo firewall-cmd --reload${NC}"
+}
+
 # Report whatever the firewall already says about the OSC ports. This is the whole
 # of --no-firewall's job: someone who does not want the installer touching their
 # firewall still needs to know whether the ports are open, because a blocked 9001
@@ -1737,6 +1816,10 @@ report_firewall_rules() {
     [ "$found" -eq 1 ] || echo -e "  * ${YELLOW}no firewall tool found to inspect${NC}"
 }
 
+# VRChat and VRCOSC on the same machine talk over loopback, which no firewall
+# rule affects. These ports are opened for the cases that do cross the network:
+# OSC clients on another device, and OSCQuery's mDNS discovery. Refuse the whole
+# thing with --no-firewall, which still reports what is already open.
 configure_firewall() {
     log_info "Checking firewall configuration for OSC and OSCQuery mDNS ports (9000/9001/5353 UDP)..."
     report_firewall_rules
@@ -1769,6 +1852,10 @@ configure_firewall() {
         sudo -n iptables -I INPUT -p udp --dport 9001 -j ACCEPT 2>/dev/null || true
         sudo -n iptables -I INPUT -p udp --dport 5353 -j ACCEPT 2>/dev/null || true
         applied=1
+        # Unlike the firewalld and ufw branches, these are in-memory only.
+        log_warn "iptables rules are not persistent and will be gone after a reboot."
+        log_warn "Save them with your distribution's iptables-persistent equivalent, or"
+        log_warn "just run this installer again."
     fi
 
     if [ "$applied" -eq 0 ]; then
@@ -1864,6 +1951,15 @@ patch_vrchat_launch_bridge() {
             cp -p "$target_launch" "$backup_launch"
             chmod 444 "$backup_launch"
         fi
+    elif [ -f "$target_launch" ] && ! is_launch_bridge "$target_launch" \
+         && ! files_identical "$target_launch" "$backup_launch"; then
+        # Steam has restored a launch.exe that is neither our bridge nor the one we
+        # backed up, i.e. VRChat updated. Refreshing the backup keeps the bridge's
+        # fallback on the current stock launcher instead of an older one.
+        log_info "VRChat's launch.exe changed; refreshing launch.org.exe from it."
+        chmod 644 "$backup_launch" 2>/dev/null || true
+        cp -p "$target_launch" "$backup_launch"
+        chmod 444 "$backup_launch"
     fi
 
     log_info "Installing Linux IPC launch.exe wrapper into VRChat directory..."
@@ -2011,12 +2107,21 @@ if [ "\${VRCOSC_JOIN:-1}" != "0" ] && command -v nsenter >/dev/null && vrc_pid="
             | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \\
             | grep -vE '^(WINELOADERNOEXEC|WINEPRELOADRESERVE|WINEDEBUG|_|PWD|OLDPWD|SHLVL)=' \\
             | while IFS= read -r line; do printf 'export %s=%q\\n' "\${line%%=*}" "\${line#*=}"; done > "\$envfile"
-        echo "VRCOSC: joining VRChat's wine session (pid \$vrc_pid)" >&2
-        exec nsenter -t "\$vrc_pid" -U -m --preserve-credentials env -i bash -c \\
-            'source "\$1"; rm -f "\$1"; export WINEDEBUG=-all; exec "\$2" "\$3" "\$4" "\${@:5}"' \\
-            _ "\$envfile" "\$wine" "\$DOTNET" "\$ENTRY" "\$@"
+        # Probe before exec. exec replaces this shell, so a failing nsenter would
+        # leave the user with an nsenter error, no VRCOSC and a leaked env file --
+        # no fallback, because there is no shell left to fall back in.
+        if nsenter -t "\$vrc_pid" -U -m --preserve-credentials true 2>/dev/null; then
+            echo "VRCOSC: joining VRChat's wine session (pid \$vrc_pid)" >&2
+            exec nsenter -t "\$vrc_pid" -U -m --preserve-credentials env -i bash -c \\
+                'source "\$1"; rm -f "\$1"; export WINEDEBUG=-all; exec "\$2" "\$3" "\$4" "\${@:5}"' \\
+                _ "\$envfile" "\$wine" "\$DOTNET" "\$ENTRY" "\$@"
+        fi
+        rm -f "\$envfile"
+        echo "VRCOSC: could not enter VRChat's namespaces; falling back to protontricks." >&2
+        echo "VRCOSC: VRChat will not be detected in this session." >&2
+    else
+        echo "VRCOSC: VRChat is running but its Proton wine was not found; falling back to protontricks." >&2
     fi
-    echo "VRCOSC: VRChat is running but its Proton wine was not found; falling back to protontricks." >&2
 fi
 
 # --- Fallback: own wine session via protontricks ------------------------------
@@ -2024,7 +2129,13 @@ fi
 # see VRChat if the game is started afterwards -- start VRChat first for full
 # integration, then VRCOSC.
 if [ -z "\${vrc_pid:-}" ]; then
-    echo "VRCOSC: VRChat is not running; starting VRCOSC in its own wine session." >&2
+    if [ "\${VRCOSC_JOIN:-1}" = "0" ]; then
+        echo "VRCOSC: VRCOSC_JOIN=0; starting VRCOSC in its own wine session." >&2
+    elif ! command -v nsenter >/dev/null; then
+        echo "VRCOSC: nsenter (util-linux) not found; starting VRCOSC in its own wine session." >&2
+    else
+        echo "VRCOSC: VRChat is not running; starting VRCOSC in its own wine session." >&2
+    fi
     echo "VRCOSC: for VRChat detection, start VRChat first, then VRCOSC." >&2
 fi
 
@@ -2226,6 +2337,12 @@ uninstall_vrcosc() {
         fi
         removed=1
     fi
+
+    # The flatpak grants are part of what installing did to this machine, so
+    # "cleanly remove" has to include them.
+    revoke_protontricks_permissions && removed=1
+
+    report_firewall_rules_on_uninstall
 
     if [ "$DRY_RUN" -eq 1 ]; then
         log_info "Dry run complete; nothing was removed."

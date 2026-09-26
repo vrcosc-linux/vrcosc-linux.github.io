@@ -161,7 +161,7 @@ curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- [OPTIONS]
 | `-b, --backup` | Create a high-compression backup (`.7z` / `.tar.xz`) of VRCOSC settings, profiles, packages and the prefix registries to your Desktop. Symlinked config directories are followed, and the regenerated `runtime/` and `logs/` caches are left out |
 | `-f, --force` | Force re-download and reinstall of .NET and VRCOSC binaries, including over a newer local build |
 | `--branch <live\|beta>` | Choose release channel, `live` or `beta`, default `live`. Beta is published as a GitHub prerelease and installs into its own directory with a `vrcosc-beta` command, but **shares its settings with live**: VRCOSC uses the same config directory for every release build |
-| `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, and drop the cached bridge payload. Your settings in `AppData/Roaming/VRCOSC` are kept |
+| `-u, --uninstall` | Remove VRCOSC binaries, launcher script and desktop shortcut, restore VRChat's original `launch.exe` if it was patched, drop the cached bridge payload, and revoke the flatpak permissions the installer granted. Your settings in `AppData/Roaming/VRCOSC` are kept. Firewall rules are reported but left in place — see below |
 | `--purge` | Also delete VRCOSC's settings, profiles and logs for the selected `--branch`, for every user in the prefix. Use with `--uninstall` to remove the binaries too, or on its own to delete only settings; it never installs anything. If the config directory is a symlink, the target is deleted, so check `--purge --dry-run` first |
 | `--dry-run` | Simulate actions without modifying files or installing runtimes. Honoured by every mode, including `--uninstall` and `--purge` |
 | `--no-firewall` | Inspect the firewall and report what it finds for ports 9000, 9001 and 5353, but add no rules |
@@ -257,6 +257,40 @@ The `launch.exe` bridge is not installed. Rerun the installer without
 **VRChat and VRCOSC seem to interfere with each other.**
 Start VRChat first and let it finish loading, then start VRCOSC. `--info` shows
 what is currently using the prefix.
+
+### What the installer changes outside VRCOSC's own directories
+
+Three things, none of them obvious from the name:
+
+**Flatpak permissions for protontricks**, granted only when the protontricks that
+will actually run is the flatpak one:
+
+| Override | Why |
+| :--- | :--- |
+| `--filesystem=host` | Steam libraries live wherever you put them; a narrower path would have to be recomputed per machine and would break when a library moved |
+| `--talk-name=org.mpris.MediaPlayer2.*` | VRCOSC's media module reads now-playing state over MPRIS, and VRCOSC runs inside that sandbox |
+| `--talk-name=org.freedesktop.Flatpak` | Lets protontricks start Proton's wine on the host. This is `flatpak-spawn --host`, i.e. a sandbox escape — it is granted because protontricks does not work without it, not because it is harmless |
+
+`--uninstall` revokes exactly these three and nothing else, so overrides you set
+yourself are left alone.
+
+**Firewall rules** for UDP 9000, 9001 and 5353. VRChat and VRCOSC on the same
+machine talk over loopback, which no firewall rule affects; these ports matter
+only for OSC clients on another device and for OSCQuery's mDNS discovery. Use
+`--no-firewall` to add nothing — it still reports what is already open, because a
+blocked 9001 looks exactly like VRCOSC not working. On an `iptables`-only system
+the rules are in-memory and do not survive a reboot, which the installer says at
+the time. `--uninstall` does not close the ports, since something else may now
+depend on them; it prints the command that does.
+
+**VRChat's `launch.exe`**, covered in step 6 above. `--no-patch` skips it and
+`--uninstall` restores it.
+
+### VRCOSC's own updater
+
+Files are copied flat into `AppData/Local/VRCOSC`, not into Velopack's
+`current/` layout with an `Update.exe` beside it, so VRCOSC's in-app updater does
+nothing. That is intentional — this script is the updater. Re-run it to update.
 
 ## Community & Support
 

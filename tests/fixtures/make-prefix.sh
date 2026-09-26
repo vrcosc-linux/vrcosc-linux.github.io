@@ -107,8 +107,30 @@ JSON
 }
 JSON
     fi
+    # The shape a real VRCOSC.deps.json has: the version appears as a dependency
+    # entry under targets, and as a "<name>/<version>" key under libraries. A
+    # fixture that puts it anywhere else cannot notice the layout changing.
     cat > "$app_dir/VRCOSC.deps.json" <<JSON
-{ "libraries": { "VRCOSC.App": "$vrcosc_version" } }
+{
+  "runtimeTarget": { "name": "$tfm", "signature": "" },
+  "targets": {
+    "$tfm": {
+      "VRCOSC/1.0.0": {
+        "dependencies": {
+          "VRCOSC.App": "$vrcosc_version"
+        },
+        "runtime": { "VRCOSC.dll": {} }
+      },
+      "VRCOSC.App/$vrcosc_version": {
+        "runtime": { "VRCOSC.App.dll": {} }
+      }
+    }
+  },
+  "libraries": {
+    "VRCOSC/1.0.0": { "type": "project", "serviceable": false },
+    "VRCOSC.App/$vrcosc_version": { "type": "package", "serviceable": true }
+  }
+}
 JSON
 fi
 
