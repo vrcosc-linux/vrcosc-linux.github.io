@@ -9,6 +9,11 @@ shell and userland differences but not Proton, wine or WPF rendering. Other
 distributions, SteamOS and the Steam Deck should work and are unverified; if
 you try one, the Discord thread below is the place to say how it went.
 
+The installer is written in [Amber](https://amber-lang.com), a language that
+compiles to Bash. The sources live under `src/`; `install.sh` is the compiled
+output and is committed so the one-line install keeps working. See
+[Building from source](#building-from-source).
+
 ## How it works
 
 VRCOSC is a WPF application designed for Windows. It does not merely need to *run*
@@ -317,14 +322,44 @@ generated and validated programmatically. Claims in this README about measured
 behaviour are backed by [docs/prefix-session-findings.md](docs/prefix-session-findings.md);
 anything else, treat as untested on your hardware. Use at your own risk.*
 
+## Building from source
+
+`install.sh` is generated; do not edit it by hand. The sources are Amber
+modules under `src/`, one per concern (`cli.ab`, `bridge.ab`, `dotnet.ab`, ...),
+with `src/main.ab` as the entry point and `src/state.ab` holding the flags the
+command line sets. The test fixtures under `tests/fixtures/` are Amber too.
+
+```bash
+# Amber 0.6.0-alpha; the Makefile records the version
+curl -fsSL https://amber-lang.com/install.sh | bash
+
+make          # compile src/ to install.sh and the fixtures to tests/fixtures/bin/
+make test     # everything above, then the Tier 1 suite
+make check    # fail if the committed install.sh is not what src/ compiles to
+```
+
+`make check` is what CI runs, so a change to `src/` has to be committed together
+with the rebuilt `install.sh`.
+
+Two things about this Amber release are worth knowing before changing the code.
+Sibling modules are imported by bare file name (`"state.ab"`, not `"./state.ab"`):
+Amber keys module instances on the import string as written, and two spellings
+of the same file give two copies of its variables. And the optimizer deletes a
+function's assignments to a global when the same global is later assigned at top
+level; the Makefile turns the optimizer off for builds, and the tests assign
+shared state only through the harness's `set_text`/`set_bool` helpers, which
+are exempt.
+
 ## Testing
 
-`install.sh` breaks on environments rather than on logic, so the tests are tiered
-by the environment they need. `tests/run-unit.sh` runs offline against fakes in
-seconds; `tests/run-container-matrix.sh` runs the whole thing inside throwaway
-Ubuntu/Debian/Fedora/Arch containers. See [tests/README.md](tests/README.md) for
-what each tier does and does not prove, and for the VM tier that is the only way
-to validate real Proton, bwrap and WPF rendering.
+The installer breaks on environments rather than on logic, so the tests are
+tiered by the environment they need. Tier 1 is `make test`: `amber test` runs
+every `test` block under `tests/unit/` as its own process, offline, against the
+fakes in `tests/fixtures/`, in seconds. Tier 2 runs the same suite inside
+throwaway Ubuntu/Debian/Fedora/Arch containers. See
+[tests/README.md](tests/README.md) for what each tier does and does not prove,
+and for the VM tier that is the only way to validate real Proton, bwrap and WPF
+rendering.
 
 `experiments/oscquery-probe.py` holds an OSC/OSCQuery conversation with VRChat from
 outside any wine prefix, which is how the OSC channel was verified.
