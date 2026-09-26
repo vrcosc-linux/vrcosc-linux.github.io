@@ -353,6 +353,80 @@ parse_arguments() {
     done
 }
 
+# Which package manager this system uses. Checked in order of specificity: an
+# image-based system has rpm-ostree *and* dnf, and installing with dnf there
+# either fails or writes to a layer that the next update discards.
+detect_package_manager() {
+    local os_release="${OS_RELEASE_FILE:-/etc/os-release}"
+    if [ -r "$os_release" ] && grep -qE '^ID=steamos' "$os_release"; then
+        echo "steamos"
+    elif command -v rpm-ostree &>/dev/null; then
+        echo "rpm-ostree"
+    elif command -v apt-get &>/dev/null; then
+        echo "apt"
+    elif command -v dnf &>/dev/null; then
+        echo "dnf"
+    elif command -v pacman &>/dev/null; then
+        echo "pacman"
+    elif command -v zypper &>/dev/null; then
+        echo "zypper"
+    elif command -v apk &>/dev/null; then
+        echo "apk"
+    elif command -v xbps-install &>/dev/null; then
+        echo "xbps"
+    else
+        echo "unknown"
+    fi
+}
+
+# The package that provides a command. nsenter is the only one whose package name
+# differs from the command: it ships in util-linux, which is why it is present on
+# essentially every system without anyone installing it.
+package_for() {
+    case "$1" in
+        nsenter) echo "util-linux" ;;
+        *)       echo "$1" ;;
+    esac
+}
+
+# Print the exact command for this system. protontricks is deliberately not in the
+# distro list: most repositories either do not carry it or carry a version too old
+# to know about modern Proton, and its own project recommends Flatpak or pipx.
+print_install_hint() {
+    local -a pkgs=()
+    local cmd needs_protontricks=0
+    for cmd in "$@"; do
+        if [ "$cmd" = "protontricks" ]; then
+            needs_protontricks=1
+        else
+            pkgs+=("$(package_for "$cmd")")
+        fi
+    done
+
+    if [ ${#pkgs[@]} -gt 0 ]; then
+        echo -e "${YELLOW}Install the missing packages with:${NC}"
+        case "$(detect_package_manager)" in
+            apt)        echo -e "  ${CYAN}sudo apt-get install -y ${pkgs[*]}${NC}" ;;
+            dnf)        echo -e "  ${CYAN}sudo dnf install -y ${pkgs[*]}${NC}" ;;
+            pacman)     echo -e "  ${CYAN}sudo pacman -S --needed ${pkgs[*]}${NC}" ;;
+            zypper)     echo -e "  ${CYAN}sudo zypper install -y ${pkgs[*]}${NC}" ;;
+            apk)        echo -e "  ${CYAN}sudo apk add ${pkgs[*]}${NC}" ;;
+            xbps)       echo -e "  ${CYAN}sudo xbps-install -S ${pkgs[*]}${NC}" ;;
+            rpm-ostree) echo -e "  ${CYAN}rpm-ostree install ${pkgs[*]}${NC}  (image-based system: takes effect after a reboot)" ;;
+            steamos)    echo -e "  ${CYAN}sudo steamos-readonly disable && sudo pacman -S --needed ${pkgs[*]}${NC}"
+                        echo -e "  ${YELLOW}SteamOS resets its root filesystem on update, so this may need repeating.${NC}" ;;
+            *)          echo -e "  ${CYAN}${pkgs[*]}${NC} — install these with your distribution's package manager." ;;
+        esac
+    fi
+
+    if [ "$needs_protontricks" -eq 1 ]; then
+        echo -e "${YELLOW}Install protontricks with either:${NC}"
+        echo -e "  ${CYAN}flatpak install -y flathub com.github.Matoking.protontricks${NC}"
+        echo -e "  ${CYAN}pipx install protontricks${NC}"
+        echo -e "  Bazzite and SteamOS ship it already; on SteamOS prefer the Flatpak."
+    fi
+}
+
 check_dependencies() {
     log_info "Verifying dependencies..."
     local missing=()
@@ -364,11 +438,13 @@ check_dependencies() {
 
     if [ ${#missing[@]} -gt 0 ]; then
         log_error "Error: The following required dependencies are missing: ${missing[*]}"
+        print_install_hint "${missing[@]}"
         exit 1
     fi
 
     if ! command -v nsenter &>/dev/null; then
         log_warn "nsenter (util-linux) not found: VRCOSC will run in its own wine session and will not see VRChat."
+        print_install_hint nsenter
     fi
 }
 

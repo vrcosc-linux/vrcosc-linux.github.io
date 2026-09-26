@@ -57,10 +57,35 @@ in [docs/prefix-session-findings.md](docs/prefix-session-findings.md).
 
 Before running the installer, ensure you have:
 * VRChat installed via Steam, and launched at least once under Proton.
-* **Protontricks** installed (available on Bazzite/SteamOS by default, or via Flatpak/pipx).
-* `curl` and `unzip` installed on the host system.
-* `nsenter` (from `util-linux`) for VRChat integration. Every mainstream distro
-  ships it; without it VRCOSC still runs, but cannot see VRChat.
+* **Protontricks**, which Bazzite and SteamOS ship already.
+* `curl` and `unzip`.
+* `nsenter`, for VRChat integration. It comes from `util-linux`, which is a
+  dependency of systemd, so it is present on every mainstream distribution
+  including the gaming ones; it is listed here only because without it VRCOSC
+  runs but cannot see VRChat.
+
+The installer checks all of these and, if something is missing, prints the exact
+command for your system. For reference:
+
+| System | curl, unzip, nsenter |
+| :--- | :--- |
+| Debian, Ubuntu, Mint, Pop!_OS | `sudo apt-get install -y util-linux curl unzip` |
+| Fedora, Nobara | `sudo dnf install -y util-linux curl unzip` |
+| Arch, Manjaro, EndeavourOS | `sudo pacman -S --needed util-linux curl unzip` |
+| openSUSE | `sudo zypper install -y util-linux curl unzip` |
+| Bazzite, Silverblue, other image-based | `rpm-ostree install util-linux curl unzip` (takes effect after a reboot) |
+| SteamOS / Steam Deck | `sudo steamos-readonly disable && sudo pacman -S --needed util-linux curl unzip` (may need repeating after a SteamOS update) |
+
+Protontricks is handled separately, because most distribution repositories either
+do not carry it or carry a version too old for current Proton:
+
+```bash
+flatpak install -y flathub com.github.Matoking.protontricks
+```
+
+```bash
+pipx install protontricks
+```
 
 ## Quick Install (One-Paste)
 
