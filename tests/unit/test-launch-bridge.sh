@@ -15,8 +15,15 @@ LAUNCH_BRIDGE_CACHE="$HOME/.local/share/vrcosc-linux/vrc-launch-bridge.exe"
 DRY_RUN=0
 PATCH_LAUNCH=1   # the default; --no-patch is covered by its own tests at the end
 
+# The digest install.sh pins is for the real payload; these tests serve a fake
+# one, so point the pin at whatever the fake curl is about to hand out.
+expect_payload() {
+    LAUNCH_BRIDGE_SHA256="$(printf '%s' "$1" | sha256sum | awk '{print $1}')"
+}
+
 # A fake curl, so nothing here touches the network.
 make_curl() {
+    expect_payload "$1"
     cat > "$WORK/bin/curl" <<CURL
 #!/usr/bin/env bash
 out=""
@@ -75,6 +82,7 @@ case "$url" in
 esac
 CURL
 chmod +x "$WORK/bin/curl"
+expect_payload "MZfrom-raw-github"
 bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
 assert_eq "MZfrom-raw-github" "$(cat "$bridge" 2>/dev/null)"
 
@@ -343,6 +351,77 @@ assert_contains "$out" "nothing was removed"
 it "while a real uninstall does remove the install directory"
 PATH="$WORK/bin:$PATH" uninstall_vrcosc >/dev/null 2>&1
 assert_eq "1" "$([ -e "$app_dir/VRCOSC.dll" ] && echo 0 || echo 1)"
+
+# --- a cached bridge must not be kept forever ---------------------------------
+# resolve_launch_bridge used to return any cached file that existed, so anyone who
+# installed the documented `curl | bash` way kept the first bridge they ever
+# fetched. Only people who cloned the repo received updates.
+
+CACHE="$(get_launch_bridge_cache)"
+
+it "the shipped bridge matches the digest install.sh pins"
+LAUNCH_BRIDGE_SHA256="$(sha256sum < "$REPO_ROOT/bin/vrc-launch-bridge.exe" | awk '{print $1}')"
+launch_bridge_is_current "$REPO_ROOT/bin/vrc-launch-bridge.exe"
+assert_ok "$?"
+
+it "a stale cache is replaced rather than reused"
+mkdir -p "$(dirname "$CACHE")"
+printf 'MZan-old-bridge-from-2024' > "$CACHE"
+make_curl "MZthe-current-bridge"
+bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
+assert_eq "MZthe-current-bridge" "$(cat "$bridge" 2>/dev/null)"
+
+it "a current cache is still reused without calling curl"
+rm -f "$WORK/bin/curl"
+bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
+assert_eq "MZthe-current-bridge" "$(cat "$bridge" 2>/dev/null)"
+
+it "a source serving a build behind main is skipped for the next source"
+# Pages can lag the repository; the raw.githubusercontent fallback only means
+# something if a wrong payload is recognised as wrong.
+cat > "$WORK/bin/curl" <<'CURL'
+#!/usr/bin/env bash
+out=""; url=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift 2 ;;
+        http*) url="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+case "$url" in
+    https://vrcosc-linux.github.io/*) printf 'MZa-stale-pages-build' > "$out" ;;
+    *) printf 'MZthe-newest-bridge' > "$out" ;;
+esac
+CURL
+chmod +x "$WORK/bin/curl"
+expect_payload "MZthe-newest-bridge"
+rm -f "$CACHE"
+bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
+assert_eq "MZthe-newest-bridge" "$(cat "$bridge" 2>/dev/null)"
+
+it "when every source disagrees, a stale cache beats no bridge at all"
+printf 'MZan-old-bridge' > "$CACHE"
+expect_payload "MZsomething-no-source-serves"
+bridge="$(PATH="$WORK/bin:$PATH" resolve_launch_bridge)"
+assert_eq "MZan-old-bridge" "$(cat "$bridge" 2>/dev/null)"
+
+it "and with no cache either, it still refuses rather than install a wrong payload"
+rm -f "$CACHE"
+PATH="$WORK/bin:$PATH" resolve_launch_bridge >/dev/null 2>&1
+assert_fails "$?"
+
+it "a host without sha256sum is not locked out of installing"
+mkdir -p "$WORK/nosha"
+printf '#!/bin/sh
+exit 127
+' > "$WORK/nosha/sha256sum"; chmod +x "$WORK/nosha/sha256sum"
+printf 'MZwhatever-is-cached' > "$CACHE"
+bridge="$(PATH="$WORK/nosha:$WORK/bin:$PATH" resolve_launch_bridge)"
+assert_eq "MZwhatever-is-cached" "$(cat "$bridge" 2>/dev/null)"
+
+rm -f "$CACHE"
+make_curl "MZfake-bridge-payload"
 
 # --- the bridge must never become its own fallback ----------------------------
 # launch.org.exe is what RunOriginal() starts. If it is a bridge, that call

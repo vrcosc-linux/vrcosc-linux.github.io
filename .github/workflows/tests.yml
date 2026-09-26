@@ -1,0 +1,39 @@
+# Tier 1 tests: offline, against fakes. No network, no Steam, no wine, no root,
+# which is what makes them runnable here at all.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # p7zip for the backup suite, shellcheck for the lint step the runner does
+      # itself. Everything else the tests need is already on the image.
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends p7zip-full shellcheck
+
+      - name: Run tests
+        run: bash tests/run-unit.sh
+
+  # The digest install.sh pins is what stops a lagging Pages deployment handing
+  # people a different payload, so a bridge rebuilt without updating the pin has
+  # to fail here rather than in someone's VRChat directory.
+  bridge-digest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned sha256 matches the shipped bridge
+        run: |
+          pinned="$(grep -oP 'LAUNCH_BRIDGE_SHA256="\K[0-9a-f]{64}' install.sh)"
+          actual="$(sha256sum bin/vrc-launch-bridge.exe | awk '{print $1}')"
+          echo "pinned: $pinned"
+          echo "actual: $actual"
+          [ "$pinned" = "$actual" ]

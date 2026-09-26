@@ -1,0 +1,9 @@
+# Python bytecode from the scripts under experiments/
+__pycache__/
+*.py[cod]
+
+# Test scratch
+/tests/**/tmp/
+
+# Local Claude Code session state
+.claude/

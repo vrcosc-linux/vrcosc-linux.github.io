@@ -58,7 +58,9 @@
   <h2>Then</h2>
   <ul>
     <li>Start VRChat first, then run <code>vrcosc</code> or launch it from your application menu.</li>
-    <li>Run <code>bash install.sh --info</code> if anything misbehaves.</li>
+    <li>Run <code>curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- --info</code>
+    if anything misbehaves. (A piped install leaves no script file behind, so the flags
+    have to go through <code>-s --</code>.)</li>
   </ul>
 
   <h2>Options</h2>

@@ -42,6 +42,34 @@ This installer configures VRCOSC to run seamlessly by:
      time, falling back to the original binary if VRChat isn't running. Wine named
      pipes belong to a single wine session, so this only works from inside VRChat's
      own session — which is what step 8 arranges.
+   - The installer never backs up a `launch.exe` that is already a bridge. Doing so
+     would make the bridge its own fallback, and the fallback path would re-enter it
+     without bound every time VRChat was closed. If it finds a bridge with no
+     backup beside it, it says so and leaves the file alone; Steam's *Verify
+     integrity of game files* restores the stock launcher.
+
+   **The bridge binary.** You are being asked to trust a 4.6 KB executable dropped
+   over a game file, so: the source is [`bin/vrc-launch-bridge.cs`](bin/vrc-launch-bridge.cs),
+   and it targets .NET Framework 4 — wine-mono, which Proton ships. Its PE header
+   says PE32, machine i386, subsystem 3 (console), with the timestamp zeroed as a
+   deterministic Roslyn build leaves it, which corresponds to
+
+   ```
+   csc /target:exe /platform:x86 /out:bin/vrc-launch-bridge.exe bin/vrc-launch-bridge.cs
+   ```
+
+   That command is read off the binary's headers rather than reproduced here, so
+   treat it as a description of the shipped build, not a guarantee of a byte-identical
+   rebuild.
+
+   `install.sh` pins its sha256 and refuses any download that does not match, so a
+   GitHub Pages deployment lagging behind `main` cannot hand you a different
+   payload. Verify the copy in this repo with:
+
+   ```bash
+   sha256sum bin/vrc-launch-bridge.exe
+   # c197a64f8411c11bcfe8a5df1868cf7734851cfd56a494155ba29db31cbb2297
+   ```
 7. **Setting up official application branding and desktop integration** (`vrcosc.png` hicolor icon, `vrcosc.desktop` launcher, and terminal command `vrcosc`).
 8. **Running VRCOSC inside VRChat's own wine session.** The generated launcher finds
    the running game, enters its namespaces (`nsenter -U -m` — unprivileged, since
@@ -114,8 +142,17 @@ curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- --branch beta
 
 ## CLI Options & Usage
 
+From a clone:
+
 ```bash
 bash install.sh [OPTIONS]
+```
+
+Through a pipe, flags go to `bash` itself unless you separate them with `-s --`,
+so the documented install takes them like this:
+
+```bash
+curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- [OPTIONS]
 ```
 
 | Option | Description |
@@ -165,7 +202,9 @@ Once installed, you can launch VRCOSC:
 
 ## Troubleshooting
 
-Run `bash install.sh --info` first; most of these are visible there.
+Run `--info` first; most of these are visible there. From a clone that is
+`bash install.sh --info`, and through a pipe
+`curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- --info`.
 
 **VRCOSC doesn't see VRChat — no avatar, instance or player data.**
 VRCOSC is in its own wine session. Close VRCOSC, make sure VRChat is running, and

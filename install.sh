@@ -19,10 +19,25 @@ readonly ICON_URL="https://raw.githubusercontent.com/VolcanicArts/VRCOSC/main/Lo
 # Where the launch bridge payload is fetched from when there is no local copy.
 # The Pages domain first, since that is the short URL people install from; raw
 # GitHub second, because Pages serves a build that can lag behind a push.
+# Where this script is published, for messages that tell people how to re-run it.
+readonly INSTALL_URL="https://vrcosc-linux.github.io/install.sh"
+
 readonly -a LAUNCH_BRIDGE_URLS=(
     "https://vrcosc-linux.github.io/bin/vrc-launch-bridge.exe"
     "https://raw.githubusercontent.com/vrcosc-linux/vrcosc-linux.github.io/main/bin/vrc-launch-bridge.exe"
 )
+
+# sha256 of bin/vrc-launch-bridge.exe in this repo. The script and the payload are
+# versioned together, so the expected digest can simply be written down here. It
+# does two things an MZ check cannot: it tells a cached bridge from an older
+# install apart from the current one, so piped installs stop keeping the first
+# bridge they ever fetched forever, and it makes the raw.githubusercontent
+# fallback meaningful when Pages is serving a build behind main.
+#
+# Regenerate with: sha256sum bin/vrc-launch-bridge.exe
+# Not readonly, so tests can point it at their own fake payload and exercise this
+# code path rather than stubbing it out.
+LAUNCH_BRIDGE_SHA256="c197a64f8411c11bcfe8a5df1868cf7734851cfd56a494155ba29db31cbb2297"
 
 # Default state variables (configured solely via command-line arguments)
 VRCOSC_BRANCH="live" # live or beta
@@ -154,12 +169,19 @@ resolve_launch_bridge() {
 
     local cache
     cache="$(get_launch_bridge_cache)"
-    if [ -f "$cache" ]; then
+    # A cache that matches the pinned digest is current. One that does not is from
+    # an older install, and is re-fetched rather than kept forever.
+    if [ -f "$cache" ] && launch_bridge_is_current "$cache"; then
         echo "$cache"
         return 0
     fi
 
-    [ "$allow_download" -eq 1 ] || return 1
+    [ "$allow_download" -eq 1 ] || {
+        # Nothing to verify against and nothing to download: a stale cache is still
+        # better than no bridge at all for read-only callers.
+        [ -f "$cache" ] && { echo "$cache"; return 0; }
+        return 1
+    }
     [ "$DRY_RUN" -eq 1 ] && return 1
 
     local tmp url got=0
@@ -169,9 +191,20 @@ resolve_launch_bridge() {
         # A rate-limit page or an HTML error body is not a PE binary; refuse it
         # rather than installing garbage over VRChat's launcher.
         [ "$(head -c 2 "$tmp")" = "MZ" ] || continue
+        # Pages can serve a build behind main, so a payload that is not the one
+        # this script was published with means try the next source.
+        launch_bridge_is_current "$tmp" || continue
         got=1
         break
     done
+
+    # Every source disagreed with the pinned digest. A stale cache still works;
+    # preferring it over nothing keeps vrchat:// navigation alive.
+    if [ "$got" -eq 0 ] && [ -f "$cache" ]; then
+        rm -f "$tmp"
+        echo "$cache"
+        return 0
+    fi
     if [ "$got" -eq 0 ]; then
         rm -f "$tmp"
         return 1
@@ -770,7 +803,19 @@ warn_if_prefix_busy() {
     holders="$(get_prefix_holders)"
     [ -n "$holders" ] || return 0
 
-    find_vrchat_container_pid >/dev/null 2>&1 && return 0
+    # VRChat holding the prefix is fine for the launcher, which joins that
+    # session on purpose -- but not for the installer. apply_wpf_registry_fix()
+    # and the .NET install run through protontricks, which starts a second
+    # wineserver on the same prefix. Each wineserver holds the registry in memory
+    # and writes user.reg/system.reg wholesale on shutdown, so ours saves the
+    # patch seconds later and VRChat's overwrites it hours later with a snapshot
+    # taken before the patch existed. The install looks like it worked and the
+    # black-window fix is simply gone.
+    if find_vrchat_container_pid >/dev/null 2>&1; then
+        log_warn "VRChat is running. Files installed into the prefix are unaffected, but"
+        log_warn "registry writes are not: see the note at the registry step below."
+        return 0
+    fi
 
     others="$(printf '%s' "$holders" | awk '{print $2}' | sort -u | tr '\n' ' ')"
     log_warn "Wine processes are already running in this prefix: ${others}"
@@ -984,8 +1029,11 @@ locate_vrchat_prefix() {
         done
         log_success "Using VRChat prefix at: $VRC_COMPATDATA"
     else
+        # A piped install has no TTY, so the prompt above never appears. Say how to
+        # pass the flag through a pipe, where bare flags would go to bash instead.
         log_error "Error: Running non-interactively and prefix was not found."
-        echo "Pass --prefix <PATH> explicitly."
+        echo "Pass --prefix <PATH> explicitly:"
+        echo "  curl -sSL ${INSTALL_URL} | bash -s -- --prefix /path/to/compatdata/438100"
         exit 1
     fi
 }
@@ -1340,9 +1388,36 @@ configure_protontricks_permissions() {
     fi
 }
 
+# True when the prefix registry already carries the patch, so a reinstall does
+# not need to write it at all.
+wpf_registry_fix_applied() {
+    local user_reg="$VRC_COMPATDATA/pfx/user.reg"
+    [ -f "$user_reg" ] || return 1
+    grep -qi 'Avalon\.Graphics' "$user_reg" 2>/dev/null || return 1
+    grep -qi '"DisableHWAcceleration"=dword:00000001' "$user_reg" 2>/dev/null
+}
+
 apply_wpf_registry_fix() {
     log_info "Applying WPF hardware acceleration registry fix (prevents black window bug)..."
     [ "$DRY_RUN" -eq 1 ] && return 0
+
+    if wpf_registry_fix_applied; then
+        log_success "WPF registry patch already present in the prefix; leaving it alone."
+        return 0
+    fi
+
+    # A wineserver holds the registry in memory and writes user.reg/system.reg
+    # wholesale when it exits. protontricks starts a second wineserver on the same
+    # prefix, so ours saves the patch seconds from now and VRChat's overwrites it
+    # hours from now with a snapshot taken before the patch existed. Writing here
+    # would report success and leave nothing behind.
+    if find_vrchat_container_pid >/dev/null 2>&1; then
+        log_warn "VRChat is running, so this patch cannot be written: its wineserver will"
+        log_warn "rewrite the registry from memory when it exits and discard ours."
+        log_warn "Close VRChat and run the installer again. Until then VRCOSC may open as"
+        log_warn "a black window."
+        return 0
+    fi
 
     local reg_file="$VRC_COMPATDATA/pfx/drive_c/vrcosc_disable_hw_acc.reg"
 
@@ -2037,6 +2112,15 @@ purge_vrcosc_config() {
 # Put VRChat's own launch.exe back. Only the bridge is ours to remove: if Steam
 # has already restored a stock launcher, or shipped a newer one, that file stays
 # and only our now-redundant backup goes.
+# True when a payload is the exact bridge this script was published with. Without
+# sha256sum there is nothing to compare against, so the check passes rather than
+# refusing to install on a host that simply lacks coreutils' hashing tool.
+launch_bridge_is_current() {
+    [ -f "$1" ] || return 1
+    command -v sha256sum >/dev/null 2>&1 || return 0
+    [ "$(sha256sum < "$1" | awk '{print $1}')" = "$LAUNCH_BRIDGE_SHA256" ]
+}
+
 # True when a file is one of our launch bridges, of any build. The payload embeds
 # this marker; VRChat's own launcher does not. Used where comparing against the
 # current payload is not enough, because an older bridge differs from it byte for
