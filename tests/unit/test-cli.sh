@@ -40,6 +40,16 @@ assert_contains "$out" "--no-patch"
 it "--help documents the firewall flag under its current name"
 assert_contains "$out" "--no-firewall"
 
+it "--help documents how to refuse the menu entry"
+assert_contains "$out" "--no-menu-shortcut"
+
+it "--help documents how to refuse the desktop shortcut"
+assert_contains "$out" "--no-desktop-shortcut"
+
+it "accepts both shortcut flags rather than rejecting them as unknown"
+out="$(run_install --no-menu-shortcut --no-desktop-shortcut --dry-run)"
+assert_not_contains "$out" "Unknown option"
+
 it "rejects an unknown --runtime value"
 out="$(run_install --runtime nonsense)"; rc=$?
 assert_fails $rc

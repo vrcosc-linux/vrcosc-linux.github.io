@@ -73,6 +73,11 @@ assert_file_exists() {
     if [ -e "$path" ]; then _pass "$what"; else _fail "$what" "missing path: $path"; fi
 }
 
+assert_file_executable() {
+    local path="$1" what="${2:-$CURRENT_TEST}"
+    if [ -x "$path" ]; then _pass "$what"; else _fail "$what" "not executable: $path"; fi
+}
+
 assert_file_missing() {
     local path="$1" what="${2:-$CURRENT_TEST}"
     if [ ! -e "$path" ]; then _pass "$what"; else _fail "$what" "unexpected path: $path"; fi

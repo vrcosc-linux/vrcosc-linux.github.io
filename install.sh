@@ -53,6 +53,8 @@ INFO_MODE=0
 DRY_RUN=0
 NO_FIREWALL=0
 PATCH_LAUNCH=1            # patching VRChat's launch.exe; refuse it with --no-patch
+MENU_SHORTCUT=1           # application-menu entry; refuse it with --no-menu-shortcut
+DESKTOP_SHORTCUT=1        # icon on the desktop; refuse it with --no-desktop-shortcut
 PURGE_MODE=0              # delete settings and profiles as well; see --purge
 VRC_COMPATDATA=""
 RUNTIME_MODE="auto"        # auto | no-bwrap | host | container
@@ -86,6 +88,26 @@ get_launcher_script() {
 
 get_desktop_file() {
     [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && echo "$HOME/.local/share/applications/vrcosc-beta.desktop" || echo "$HOME/.local/share/applications/vrcosc.desktop"
+}
+
+# The user's desktop directory. xdg-user-dir knows the localised name; without
+# it, ~/Desktop is the only reasonable guess.
+get_desktop_dir() {
+    local dir
+    dir="$(xdg-user-dir DESKTOP 2>/dev/null || true)"
+    # xdg-user-dir prints $HOME when the desktop directory is unset or disabled.
+    # Writing vrcosc.desktop straight into the home directory would be wrong,
+    # and uninstall would then delete a path we should never have chosen.
+    if [ -z "$dir" ] || [ "$dir" = "$HOME" ]; then
+        dir="$HOME/Desktop"
+    fi
+    echo "$dir"
+}
+
+get_desktop_shortcut() {
+    local dir
+    dir="$(get_desktop_dir)"
+    [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && echo "$dir/vrcosc-beta.desktop" || echo "$dir/vrcosc.desktop"
 }
 
 get_app_icon_path() {
@@ -227,6 +249,8 @@ get_all_installed_files() {
     get_launcher_script beta
     get_desktop_file live
     get_desktop_file beta
+    get_desktop_shortcut live
+    get_desktop_shortcut beta
     get_app_icon_path
 }
 
@@ -305,13 +329,16 @@ print_usage() {
     echo "  -b, --backup              Create a high-compression backup of VRCOSC configs & prefix registries to Desktop"
     echo "  -f, --force               Force re-download and re-installation of .NET and VRCOSC"
     echo "      --branch <live|beta>  Specify release channel to install (default: live)"
-    echo "  -u, --uninstall           Uninstall VRCOSC binaries, launcher script, and desktop shortcut"
+    echo "  -u, --uninstall           Uninstall VRCOSC binaries, launcher script, menu entry"
+    echo "                            and desktop shortcut"
     echo "      --purge               Also delete VRCOSC's settings, profiles and logs for the"
     echo "                            selected --branch. Use with --uninstall to remove binaries"
     echo "                            too, or on its own to delete only settings. Installs"
     echo "                            nothing. Follows the config directory if it is a symlink."
     echo "      --dry-run             Simulate actions without writing files or running installers"
     echo "      --no-firewall         Inspect firewall rules but add none"
+    echo "      --no-menu-shortcut    Do not create the application-menu entry"
+    echo "      --no-desktop-shortcut Do not create the shortcut on the desktop"
     echo "      --no-patch            Leave VRChat's launch.exe alone. The bridge is what makes"
     echo "                            vrchat:// navigation work from VRCOSC and companion tools;"
     echo "                            without it everything else still works."
@@ -391,6 +418,14 @@ parse_arguments() {
                 ;;
             --no-firewall|--skip-firewall)
                 NO_FIREWALL=1
+                shift
+                ;;
+            --no-menu-shortcut)
+                MENU_SHORTCUT=0
+                shift
+                ;;
+            --no-desktop-shortcut)
+                DESKTOP_SHORTCUT=0
                 shift
                 ;;
             --no-patch)
@@ -1306,6 +1341,10 @@ show_diagnostics() {
     echo -e "  * Command (vrcosc-beta):   $([ -f "$v_beta" ] && echo -e "${CYAN}Installed ($v_beta)${NC}" || echo -e "${YELLOW}Missing${NC}")"
     echo -e "  * Desktop (Live):          $([ -f "$d_live" ] && echo -e "${CYAN}Present ($d_live)${NC}" || echo -e "${YELLOW}Missing${NC}")"
     echo -e "  * Desktop (Beta):          $([ -f "$d_beta" ] && echo -e "${CYAN}Present ($d_beta)${NC}" || echo -e "${YELLOW}Missing${NC}")"
+    local s_live="$(get_desktop_shortcut live)"
+    local s_beta="$(get_desktop_shortcut beta)"
+    echo -e "  * Shortcut (Live):         $([ -f "$s_live" ] && echo -e "${CYAN}Present ($s_live)${NC}" || echo -e "${YELLOW}Missing${NC}")"
+    echo -e "  * Shortcut (Beta):         $([ -f "$s_beta" ] && echo -e "${CYAN}Present ($s_beta)${NC}" || echo -e "${YELLOW}Missing${NC}")"
     echo -e "  * Icon:                    $([ -f "$icon_path" ] && echo -e "${CYAN}Present ($icon_path)${NC}" || echo -e "${YELLOW}Missing${NC}")"
 
     local vrc_game_dir="$(get_vrchat_game_dir)"
@@ -1332,7 +1371,7 @@ create_backup() {
     locate_vrchat_prefix
 
     local desktop_dir
-    desktop_dir="$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")"
+    desktop_dir="$(get_desktop_dir)"
     mkdir -p "$desktop_dir"
 
     local timestamp="$(date +%s)"
@@ -2051,8 +2090,61 @@ launcher_is_stale() {
     return 0
 }
 
+# Writes one .desktop file. Both the menu entry and the desktop icon are the
+# same document; only where it lives differs.
+write_desktop_entry() {
+    local path="$1" app_name="$2" exec_path="$3"
+    mkdir -p "$(dirname "$path")"
+    cat > "$path" << EOF_DESKTOP
+[Desktop Entry]
+Name=$app_name
+Comment=OSC controller for VRChat
+Exec=$exec_path
+Icon=vrcosc
+Terminal=false
+Type=Application
+Categories=Game;Utility;
+StartupWMClass=VRCOSC
+EOF_DESKTOP
+}
+
+# Rebuilds the menu's mimeinfo cache. Most desktops watch
+# ~/.local/share/applications and pick a new entry up immediately, but the ones
+# that rely on the cache instead will not show VRCOSC until the next login.
+# update-desktop-database ships with desktop-file-utils, which is not a
+# dependency of anything here, so a missing tool is fine.
+refresh_desktop_database() {
+    command -v update-desktop-database >/dev/null 2>&1 || return 0
+    update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+}
+
+# A .desktop file sitting on the desktop is not launchable until the file
+# manager trusts it: every one of them wants the executable bit, and GNOME's
+# Nautilus additionally wants the metadata::trusted attribute. gio is part of
+# glib2 and so effectively always present, but it is not required -- on KDE the
+# executable bit alone is enough, and a missing attribute costs a user one
+# "Allow launching" click rather than a broken shortcut.
+trust_desktop_shortcut() {
+    local path="$1"
+    chmod +x "$path" 2>/dev/null || true
+    command -v gio >/dev/null 2>&1 || return 0
+    gio set "$path" metadata::trusted true 2>/dev/null || true
+}
+
+# True when a shortcut should be written: its flag is on, and either this is a
+# normal install or the file is already there and merely out of date.
+shortcut_wanted() {
+    local enabled="$1" path="$2" refresh="$3"
+    [ "$enabled" -eq 1 ] || return 1
+    [ -z "$refresh" ] || [ -f "$path" ]
+}
+
 write_launcher() {
     local branch="$1"
+    # In refresh mode we are repairing a branch the user is not installing, so
+    # only shortcuts that already exist are rewritten -- a stale launcher is no
+    # reason to put a new icon on someone's desktop.
+    local refresh="${2:-}"
     local launch_script="$(get_launcher_script "$branch")"
     local win_entry="C:/users/steamuser/AppData/Local/VRCOSC/VRCOSC.dll"
     local desktop_entry="$(get_desktop_file "$branch")"
@@ -2223,18 +2315,17 @@ exec env "\${SCRUB[@]}" protontricks "\${RUNTIME_FLAGS[@]}" \\
 EOF_LAUNCHER
     chmod +x "$launch_script"
 
-    mkdir -p "$(dirname "$desktop_entry")"
-    cat << EOF_DESKTOP > "$desktop_entry"
-[Desktop Entry]
-Name=$app_name
-Comment=OSC controller for VRChat
-Exec=$launch_script
-Icon=vrcosc
-Terminal=false
-Type=Application
-Categories=Game;Utility;
-StartupWMClass=VRCOSC
-EOF_DESKTOP
+    local shortcut
+    shortcut="$(get_desktop_shortcut "$branch")"
+
+    if shortcut_wanted "$MENU_SHORTCUT" "$desktop_entry" "$refresh"; then
+        write_desktop_entry "$desktop_entry" "$app_name" "$launch_script"
+    fi
+
+    if shortcut_wanted "$DESKTOP_SHORTCUT" "$shortcut" "$refresh"; then
+        write_desktop_entry "$shortcut" "$app_name" "$launch_script"
+        trust_desktop_shortcut "$shortcut"
+    fi
 }
 
 # Rewrites launchers left behind by an older installer for the branch we are
@@ -2248,16 +2339,26 @@ refresh_stale_launchers() {
         launcher_is_stale "$script" || continue
         log_warn "$(basename "$script") was written by an older installer and cannot join"
         log_warn "VRChat's wine session; rewriting it so it works while VRChat runs."
-        write_launcher "$branch"
+        write_launcher "$branch" refresh
     done
 }
 
 create_launchers() {
-    log_info "Creating launch script and desktop entry..."
+    # `[ x ] && y` as a whole statement returns 1 when the test fails, which
+    # under `set -e` aborts the install. Every one of these needs an if.
+    local wanted=()
+    if [ "$MENU_SHORTCUT" -eq 1 ]; then wanted+=("menu entry"); fi
+    if [ "$DESKTOP_SHORTCUT" -eq 1 ]; then wanted+=("desktop shortcut"); fi
+    if [ "${#wanted[@]}" -eq 0 ]; then
+        log_info "Creating launch script (no shortcuts: --no-menu-shortcut, --no-desktop-shortcut)..."
+    else
+        log_info "Creating launch script and $(IFS=,; echo "${wanted[*]}" | sed 's/,/ and /')..."
+    fi
     [ "$DRY_RUN" -eq 1 ] && return 0
 
     write_launcher "$VRCOSC_BRANCH"
     refresh_stale_launchers
+    if [ "$MENU_SHORTCUT" -eq 1 ]; then refresh_desktop_database; fi
 
     local launch_script="$(get_launcher_script)"
     local vrcosc_dir="$(get_vrcosc_install_dir)"
@@ -2268,7 +2369,10 @@ create_launchers() {
         echo -e "  turned it on for you, and set the update channel to Beta so the app does"
         echo -e "  not replace itself with the stable build. Beta shares its settings with live."
     fi
-    echo -e "You can launch VRCOSC from your application menu, or run '${BLUE}$(basename "$launch_script")${NC}' in the terminal."
+    local from="run '${BLUE}$(basename "$launch_script")${NC}' in the terminal"
+    if [ "$DESKTOP_SHORTCUT" -eq 1 ]; then from="use the desktop shortcut, or $from"; fi
+    if [ "$MENU_SHORTCUT" -eq 1 ]; then from="find VRCOSC in your application menu, $from"; fi
+    echo -e "You can $from."
     echo -e "\n${BLUE}VRCOSC Directory Paths:${NC}"
     echo -e "  * ${GREEN}Config Folder (Profiles & Settings):${NC}"
     echo -e "    $VRC_COMPATDATA/pfx/drive_c/users/steamuser/AppData/Roaming/VRCOSC"
@@ -2419,6 +2523,7 @@ uninstall_vrcosc() {
             removed=1
         fi
     done <<< "$(get_all_installed_files)"
+    if [ "$DRY_RUN" -ne 1 ]; then refresh_desktop_database; fi
 
     # Undo the launch.exe patch, and drop the bridge payload we cached for it.
     restore_vrchat_launch_bridge && removed=1

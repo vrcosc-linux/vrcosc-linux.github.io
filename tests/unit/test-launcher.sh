@@ -10,10 +10,29 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 mkdir -p "$WORK/home" "$WORK/bin"
+# get_desktop_dir() shells out to xdg-user-dir, which would answer for the real
+# user running the suite. Keep every shortcut inside the fake HOME.
+cat > "$WORK/bin/xdg-user-dir" <<'STUB'
+#!/usr/bin/env bash
+echo "$HOME/Desktop"
+STUB
+chmod +x "$WORK/bin/xdg-user-dir"
+# Stubbed up here, not beside the test that uses it: bash hashes a command the
+# first time it resolves one, so the real update-desktop-database found during
+# an earlier create_launchers would keep winning over a stub planted later.
+cat > "$WORK/bin/update-desktop-database" <<'STUB'
+#!/usr/bin/env bash
+echo "$1" >> "$UDD_LOG"
+STUB
+chmod +x "$WORK/bin/update-desktop-database"
+export UDD_LOG="$WORK/udd.log"
+PATH="$WORK/bin:$PATH"
 ln -sf "$FIXTURES/fake-protontricks" "$WORK/bin/protontricks"
 HOME="$WORK/home"
 VRC_COMPATDATA="$("$FIXTURES/make-prefix.sh" --root "$WORK/steam" --dotnet 9.0.14)"
 DRY_RUN=0
+MENU_SHORTCUT=1
+DESKTOP_SHORTCUT=1
 
 generate_for() {
     RESOLVED_RUNTIME_MODE="$1"
@@ -98,5 +117,91 @@ assert_eq "$before" "$(cat "$current")"
 
 it "warns that VRChat cannot start while VRCOSC owns the prefix"
 assert_contains "$(cat "$(get_launcher_script live)")" "VRChat cannot be started"
+
+# Shortcuts. The menu entry has always been written; the desktop icon is new,
+# and both must be refusable, because a headless or tidy-desktop install has no
+# use for either.
+reset_shortcuts() {
+    rm -rf "$WORK/home/Desktop" "$WORK/home/.local/share/applications" "$WORK/home/.local/bin"
+    MENU_SHORTCUT="$1"
+    DESKTOP_SHORTCUT="$2"
+    VRCOSC_BRANCH="${3:-live}"
+    RESOLVED_RUNTIME_MODE=no-bwrap
+    create_launchers >/dev/null 2>&1
+}
+
+it "creates a desktop shortcut by default"
+reset_shortcuts 1 1
+assert_file_exists "$(get_desktop_shortcut live)"
+
+it "and the desktop shortcut is executable, as file managers require"
+assert_file_executable "$(get_desktop_shortcut live)"
+
+it "and it runs the launcher, not the dll directly"
+assert_contains "$(cat "$(get_desktop_shortcut live)")" "Exec=$(get_launcher_script live)"
+
+it "creates the menu entry by default"
+assert_file_exists "$(get_desktop_file live)"
+
+it "--no-desktop-shortcut leaves the desktop alone"
+reset_shortcuts 1 0
+assert_file_missing "$(get_desktop_shortcut live)"
+
+it "but still writes the menu entry"
+assert_file_exists "$(get_desktop_file live)"
+
+it "--no-menu-shortcut leaves the application menu alone"
+reset_shortcuts 0 1
+assert_file_missing "$(get_desktop_file live)"
+
+it "but still writes the desktop shortcut"
+assert_file_exists "$(get_desktop_shortcut live)"
+
+it "both flags together write neither"
+reset_shortcuts 0 0
+assert_file_missing "$(get_desktop_file live)"
+
+it "and no desktop shortcut either"
+assert_file_missing "$(get_desktop_shortcut live)"
+
+it "but the launcher script is still written"
+assert_file_exists "$(get_launcher_script live)"
+
+it "names the beta shortcut separately from live"
+reset_shortcuts 1 1 beta
+assert_contains "$(get_desktop_shortcut beta)" "vrcosc-beta.desktop"
+
+it "and labels it as the beta build"
+assert_contains "$(cat "$(get_desktop_shortcut beta)")" "Name=VRCOSC (Beta)"
+
+it "repairing a stale launcher does not add shortcuts the user never had"
+reset_shortcuts 1 1 beta
+rm -f "$(get_desktop_shortcut live)" "$(get_desktop_file live)"
+printf '#!/usr/bin/env bash\nexec protontricks -c "wine old" 438100\n' > "$(get_launcher_script live)"
+create_launchers >/dev/null 2>&1
+assert_file_missing "$(get_desktop_shortcut live)"
+
+it "but does refresh a shortcut that is already there"
+reset_shortcuts 1 1 beta
+write_desktop_entry "$(get_desktop_shortcut live)" "stale" "/nonexistent"
+printf '#!/usr/bin/env bash\nexec protontricks -c "wine old" 438100\n' > "$(get_launcher_script live)"
+create_launchers >/dev/null 2>&1
+assert_contains "$(cat "$(get_desktop_shortcut live)")" "Exec=$(get_launcher_script live)"
+
+# Desktops that read the mimeinfo cache rather than watching the directory do
+# not show a new entry until it is rebuilt -- which, without this, meant the
+# next login.
+it "rebuilds the menu database after writing the menu entry"
+: > "$UDD_LOG"
+reset_shortcuts 1 1
+assert_contains "$(cat "$UDD_LOG")" "$WORK/home/.local/share/applications"
+
+it "and does not bother when the menu entry was refused"
+: > "$UDD_LOG"
+reset_shortcuts 0 1
+assert_eq "" "$(cat "$UDD_LOG")"
+
+it "uninstall knows about the desktop shortcuts"
+assert_contains "$(get_all_installed_files)" "$(get_desktop_shortcut beta)"
 
 summarise

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- The installer wrote an application-menu entry but never a desktop icon, and
+  neither was refusable. It now writes both, and both answer to a flag:
+  `--no-menu-shortcut` and `--no-desktop-shortcut`. Desktop shortcuts are made
+  executable and marked trusted via `gio` where it exists, since file managers
+  refuse to launch a `.desktop` file on the desktop otherwise. Repairing a
+  stale launcher for the branch you are *not* installing refreshes only the
+  shortcuts that already exist, so it never puts a new icon on the desktop.
+  `--uninstall` and `--info` both know about the new files.
+
+- The menu entry was written but `update-desktop-database` was never run.
+  Desktops that watch `~/.local/share/applications` picked VRCOSC up anyway;
+  the ones that read the mimeinfo cache did not show it until the next login.
+  Both install and uninstall now refresh the cache where
+  desktop-file-utils is installed.
+
 - Installing one branch left the other branch's launcher exactly as an older
   installer had written it. A user who installed beta and then typed the
   habitual `vrcosc` ran a launcher from before the session-join work: it went
