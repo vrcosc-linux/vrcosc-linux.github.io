@@ -90,4 +90,56 @@ env -i WINEPREFIX="$VRC_COMPATDATA/pfx/" PATH=/usr/bin:/bin "$WORK/VRChat.exe" 3
 VRC_PID=$!; sleep 0.5
 find_vrchat_container_pid >/dev/null; assert_fails $?
 
+# --- Diagnostics and the orphaned-wineserver case ----------------------------
+# Every crash report so far has needed a follow-up question the launcher could
+# have answered by itself, and the most recent one crashed with VRChat closed --
+# so "is VRChat running" was never the right thing to report. What the launcher
+# now reports is who holds the prefix.
+kill "$VRC_PID" 2>/dev/null; wait "$VRC_PID" 2>/dev/null; VRC_PID=""
+
+it "prints diagnostics naming the prefix it will use"
+run_launcher >/dev/null || true
+assert_contains "$(cat "$WORK/stderr")" "prefix:    $VRC_COMPATDATA/pfx"
+
+it "and the entry point, so the log says which branch ran"
+assert_contains "$(cat "$WORK/stderr")" "entry:     C:/users/steamuser/AppData/Local/VRCOSC/VRCOSC.dll"
+
+it "and the launcher generation, so a stale script is obvious in a log"
+assert_contains "$(cat "$WORK/stderr")" "generation $LAUNCHER_GENERATION"
+
+it "reports a free prefix as free"
+assert_contains "$(cat "$WORK/stderr")" "prefix is free"
+
+it "and does not warn about a stale session when there is none"
+assert_not_contains "$(cat "$WORK/stderr")" "A wine session is already running"
+
+it "VRCOSC_QUIET=1 silences the diagnostics"
+run_launcher VRCOSC_QUIET=1 >/dev/null || true
+assert_not_contains "$(cat "$WORK/stderr")" "launcher diagnostics"
+
+# A process holding the prefix that is not VRChat: the wineserver a crashed
+# VRChat leaves behind, which VRCOSC then attaches to and dies in Velopack.
+env -i WINEPREFIX="$VRC_COMPATDATA/pfx" PATH=/usr/bin:/bin sleep 300 &
+ORPHAN_PID=$!; sleep 0.5
+
+it "names the process holding the prefix when VRChat is not running"
+run_launcher >/dev/null || true
+assert_contains "$(cat "$WORK/stderr")" "$ORPHAN_PID sleep"
+
+it "and warns that this is the state VRCOSC has been crashing in"
+assert_contains "$(cat "$WORK/stderr")" "A wine session is already running in this prefix"
+
+it "and names the Access denied crash, so the log ties the two together"
+assert_contains "$(cat "$WORK/stderr")" "Access denied"
+
+it "and gives the exact command to clear it"
+assert_contains "$(cat "$WORK/stderr")" "WINEPREFIX=\"$VRC_COMPATDATA/pfx\" wineserver -k"
+
+it "still starts VRCOSC rather than refusing"
+: > "$FAKE_PT_LOG"
+run_launcher >/dev/null || true
+assert_contains "$(cat "$FAKE_PT_LOG")" "VRCOSC.dll"
+
+kill "$ORPHAN_PID" 2>/dev/null; wait "$ORPHAN_PID" 2>/dev/null
+
 summarise

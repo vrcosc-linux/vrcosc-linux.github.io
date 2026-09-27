@@ -2088,7 +2088,7 @@ patch_vrchat_launch_bridge() {
 # The shape of the generated launcher. Bump this whenever the launcher gains
 # behaviour an older copy lacks, so refresh_stale_launchers() can recognise a
 # script written by an earlier installer and rewrite it.
-readonly LAUNCHER_GENERATION=2
+readonly LAUNCHER_GENERATION=3
 
 # True when a launcher script exists but predates $LAUNCHER_GENERATION.
 #
@@ -2245,6 +2245,109 @@ repatch_launch_bridge() {
 
 repatch_launch_bridge
 
+# --- Who else is holding this prefix? ----------------------------------------
+# A prefix has one wineserver. Anything already running in it -- VRChat, or a
+# wineserver orphaned by a VRChat that crashed -- owns that server, and a
+# VRCOSC started afterwards attaches to it rather than starting its own.
+#
+# This matters because the Velopack crash ("System.ComponentModel.Win32Exception
+# (5): Access denied" in GetCurrentProcessPath) has been reported both with
+# VRChat running and with VRChat closed. The one thing the crashing runs have in
+# common, and the working run does not, is that a wineserver was already up: the
+# working run printed "fsync: up and running", which only a freshly started
+# wineserver prints. So the condition worth reporting is "someone else holds
+# this prefix", not "VRChat is running".
+prefix_holders() {
+    local proc name
+    for proc in /proc/[0-9]*; do
+        [ -r "\$proc/environ" ] || continue
+        # cat, not a redirect: reading environ needs PTRACE_MODE_READ, so [ -r ]
+        # can say yes and the open still fail -- and a failing shell redirect
+        # prints its own error that no 2>/dev/null on tr can silence. These are
+        # diagnostics; they must not spray "Permission denied" into the log.
+        cat "\$proc/environ" 2>/dev/null | tr '\\0' '\\n' \\
+            | grep -qxF -e "WINEPREFIX=\$PFX" -e "WINEPREFIX=\$PFX/" || continue
+        name="\$(cat "\$proc/comm" 2>/dev/null || true)"
+        echo "\${proc#/proc/} \${name:-unknown}"
+    done
+    return 0
+}
+
+# --- Diagnostics --------------------------------------------------------------
+# Printed on every run, because the logs people send are the only view anyone
+# has into these failures, and the last three reports all needed a follow-up
+# question that this block would have answered. VRCOSC_QUIET=1 turns it off.
+say() { echo "VRCOSC: \$*" >&2; }
+
+print_diagnostics() {
+    [ "\${VRCOSC_QUIET:-0}" = "1" ] && return 0
+    say "---- launcher diagnostics (set VRCOSC_QUIET=1 to silence) ----"
+    say "launcher:  \$0 (generation $LAUNCHER_GENERATION)"
+    say "entry:     \$ENTRY"
+    say "prefix:    \$PFX"
+    say "proton:    \$(proton_wine 2>/dev/null || echo 'not found')"
+    say "installed: \$(head -n 1 "\$COMPATDATA/config_info" 2>/dev/null || echo 'no config_info')"
+
+    local holders vrc
+    holders="\$(prefix_holders)"
+    vrc="\$(find_vrchat_pid || true)"
+
+    if [ -n "\$vrc" ]; then
+        say "vrchat:    running (pid \$vrc)"
+    else
+        say "vrchat:    not running"
+    fi
+
+    if [ -n "\$holders" ]; then
+        say "prefix is held by:"
+        printf '%s\n' "\$holders" | while read -r line; do say "  \$line"; done
+    else
+        say "prefix is free; VRCOSC will start its own wineserver"
+    fi
+    say "-------------------------------------------------------------"
+}
+
+# Warns about the state that has produced every "Access denied" crash so far:
+# a wineserver already running in this prefix that is not VRChat's, which we
+# will attach to instead of starting our own.
+warn_about_stale_session() {
+    local holders
+    holders="\$(prefix_holders)"
+    [ -n "\$holders" ] || return 0
+
+    say ""
+    say "A wine session is already running in this prefix, but VRChat is not."
+    say "That is usually a wineserver orphaned by a VRChat that crashed or was"
+    say "killed, and it is the state in which VRCOSC has been dying at startup"
+    say "with 'System.ComponentModel.Win32Exception (5): Access denied'."
+    say ""
+    say "To clear it and start clean:"
+    say "  WINEPREFIX=\"\$PFX\" wineserver -k"
+    say "Then run this launcher again. Set VRCOSC_KILL_STALE=1 to have the"
+    say "launcher do that for you."
+    say ""
+
+    if [ "\${VRCOSC_KILL_STALE:-0}" = "1" ]; then
+        local ws
+        ws="\$(command -v wineserver || true)"
+        if [ -z "\$ws" ]; then
+            ws="\$(dirname "\$(proton_wine)")/wineserver"
+        fi
+        if [ -x "\$ws" ]; then
+            say "VRCOSC_KILL_STALE=1: killing the wineserver for this prefix..."
+            WINEPREFIX="\$PFX" "\$ws" -k 2>/dev/null || true
+            sleep 1
+            if [ -n "\$(prefix_holders)" ]; then
+                say "the prefix is still held; continuing anyway."
+            else
+                say "prefix cleared."
+            fi
+        else
+            say "VRCOSC_KILL_STALE=1 was set but no wineserver binary was found."
+        fi
+    fi
+}
+
 # --- Preferred path: join VRChat's own wine session ---------------------------
 # Steam runs VRChat inside a user+mount namespace with its own wineserver. A
 # VRCOSC started outside it lands in a separate wine session (or, if it does
@@ -2256,9 +2359,9 @@ find_vrchat_pid() {
     for proc in /proc/[0-9]*; do
         [ "\$(cat "\$proc/comm" 2>/dev/null)" = "VRChat.exe" ] || continue
         [ -r "\$proc/environ" ] || continue
-        tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null \\
+        cat "\$proc/environ" 2>/dev/null | tr '\\0' '\\n' \\
             | grep -qxF -e "WINEPREFIX=\$PFX" -e "WINEPREFIX=\$PFX/" || continue
-        tr '\\0' '\\n' < "\$proc/environ" 2>/dev/null | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
+        cat "\$proc/environ" 2>/dev/null | tr '\\0' '\\n' | grep -q '^PRESSURE_VESSEL_RUNTIME=' || continue
         echo "\${proc#/proc/}"
         return 0
     done
@@ -2272,6 +2375,8 @@ proton_wine() {
     fonts="\${fonts%/}"
     echo "\$(dirname "\$(dirname "\$fonts")")/bin/wine"
 }
+
+print_diagnostics
 
 if [ "\${VRCOSC_JOIN:-1}" != "0" ] && command -v nsenter >/dev/null && vrc_pid="\$(find_vrchat_pid)"; then
     wine="\$(proton_wine)"
@@ -2317,6 +2422,7 @@ if [ -z "\${vrc_pid:-}" ]; then
     # VRChat is broken.
     echo "VRCOSC: while VRCOSC runs in its own session, VRChat cannot be started." >&2
     echo "VRCOSC: quit VRCOSC, start VRChat, then start VRCOSC again." >&2
+    warn_about_stale_session
 fi
 
 # Drop Steam Runtime variables leaked in by the calling shell. With them set,

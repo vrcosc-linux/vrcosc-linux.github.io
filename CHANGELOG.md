@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- The launcher now prints a diagnostics block on every run — script path and
+  generation, entry DLL, prefix, Proton build, whether VRChat is running, and
+  every process holding the prefix — because the last three crash reports each
+  needed a follow-up question that this would have answered. `VRCOSC_QUIET=1`
+  silences it.
+
+- It also detects a wine session holding the prefix when VRChat is *not*
+  running, which the launcher previously could not see at all: it only ever
+  looked for a live `VRChat.exe`. A report of VRCOSC crashing in Velopack with
+  "Access denied" while VRChat was closed ruled out the explanation this
+  project had been working from — that the crash comes from joining VRChat's
+  containerised session. Across four runs the thing that actually separates the
+  crashes from the one success is whether a wineserver was already up: the
+  working run printed `fsync: up and running`, which only a freshly started
+  wineserver does. So the launcher now reports a foreign prefix holder, names
+  the crash it is associated with, and gives the `wineserver -k` command to
+  clear it. `VRCOSC_KILL_STALE=1` does that automatically.
+
+  This is the best explanation of the evidence so far, not a confirmed
+  diagnosis; the diagnostics exist so the next report can settle it.
+
+- Fixed unsilenceable `Permission denied` noise in the launcher's process scan.
+  `[ -r /proc/PID/environ ]` can pass and the open still fail, and a failing
+  shell redirect prints its own error that `2>/dev/null` on the receiving `tr`
+  cannot suppress — so the diagnostics sprayed errors into the very logs they
+  exist to make readable. `cat | tr`, as `get_prefix_holders()` already did.
+
 - `tests/unit/test-cli-args.sh` had been failing on every run: it compared
   `--version` against `git describe --tags --abbrev=0`, which returns the
   most recently created tag of any kind, and this repo carries a bookmark

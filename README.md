@@ -215,9 +215,29 @@ finishes, add `--start`.
 
 ## Troubleshooting
 
+The launcher prints a diagnostics block on every run — which script and
+generation, which branch's `VRCOSC.dll`, the prefix, the Proton build, whether
+VRChat is running and what else is holding the prefix. Include it in any bug
+report; `VRCOSC_QUIET=1` turns it off.
+
 Run `--info` first; most of these are visible there. From a clone that is
 `bash install.sh --info`, and through a pipe
 `curl -sSL https://vrcosc-linux.github.io/install.sh | bash -s -- --info`.
+
+**VRCOSC dies at startup with `Win32Exception (5): Access denied`.**
+The stack trace ends in `Velopack` → `GetCurrentProcessPath` →
+`EnumProcessModules`. Every report of this so far has had one thing in common:
+a wineserver was already running in the prefix that VRCOSC did not start —
+either VRChat's, or one orphaned by a VRChat that crashed. The launcher now
+prints who holds the prefix on every run; check its diagnostics block. To clear
+an orphan:
+
+```bash
+WINEPREFIX=~/.steam/steam/steamapps/compatdata/438100/pfx wineserver -k
+```
+
+Then start the launcher again, or set `VRCOSC_KILL_STALE=1` to have it do that
+for you. Note this kills *everything* in that prefix, VRChat included.
 
 **VRCOSC doesn't see VRChat — no avatar, instance or player data.**
 VRCOSC is in its own wine session. Close VRCOSC, make sure VRChat is running, and
