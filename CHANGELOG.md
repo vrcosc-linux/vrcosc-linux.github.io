@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- `tests/unit/test-cli-args.sh` had been failing on every run: it compared
+  `--version` against `git describe --tags --abbrev=0`, which returns the
+  most recently created tag of any kind, and this repo carries a bookmark
+  tag (`pre-amber`) alongside the release tags. The test was comparing the
+  script's version against a name that was never meant to be one. It now
+  matches only `v[0-9]*`.
+
+  While there, the assertion itself was loosened from "equal to" to "not
+  older than" the newest release tag, using the installer's own
+  `compare_versions()`. Bumping `SCRIPT_VERSION` is a separate commit from
+  cutting the tag, so being ahead of the newest tag is normal mid-release;
+  being behind it means a tag was cut without the bump, which is the actual
+  mistake worth catching.
+
 - The three new flags below were documented in `--help` and the README but
   not in `index.html`, which is the page people actually land on. All three
   are there now, and `tests/unit/test-docs.sh` checks mechanically that every

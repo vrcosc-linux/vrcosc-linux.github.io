@@ -73,6 +73,12 @@ assert_file_exists() {
     if [ -e "$path" ]; then _pass "$what"; else _fail "$what" "missing path: $path"; fi
 }
 
+assert_not_eq() {
+    local unexpected="$1" actual="$2" what="${3:-$CURRENT_TEST}"
+    if [ "$actual" != "$unexpected" ]; then _pass "$what"
+    else _fail "$what" "expected anything but: [$unexpected]"; fi
+}
+
 assert_ge() {
     local actual="$1" floor="$2" what="${3:-$CURRENT_TEST}"
     if [ "$actual" -ge "$floor" ]; then _pass "$what"
