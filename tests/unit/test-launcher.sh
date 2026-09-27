@@ -63,4 +63,40 @@ env PATH="$WORK/bin:/usr/bin:/bin" FAKE_PT_LOG="$WORK/pt.log" \
     bash "$(generate_for no-bwrap live)" --some-vrcosc-flag >/dev/null 2>&1
 assert_contains "$(cat "$WORK/pt.log")" "--some-vrcosc-flag"
 
+# A user who installs beta keeps typing the `vrcosc` they are used to. If that
+# script is a leftover from an older installer it runs through protontricks with
+# no attempt to join VRChat's wine session, and dies in Velopack whenever VRChat
+# is running -- so installing one branch must repair the other branch's script.
+it "rewrites a stale launcher left behind for the other branch"
+VRCOSC_BRANCH=beta
+RESOLVED_RUNTIME_MODE=no-bwrap
+stale="$(get_launcher_script live)"
+mkdir -p "$(dirname "$stale")"
+printf '#!/usr/bin/env bash\nexec protontricks -c "wine old" 438100\n' > "$stale"
+create_launchers >/dev/null 2>&1
+assert_contains "$(cat "$stale")" "launcher-generation: $LAUNCHER_GENERATION"
+
+it "and keeps it pointed at its own branch"
+assert_contains "$(cat "$stale")" "AppData/Local/VRCOSC/VRCOSC.dll"
+
+it "does not invent a launcher for a branch that has none"
+rm -f "$(get_launcher_script live)" "$(get_launcher_script beta)"
+VRCOSC_BRANCH=beta
+create_launchers >/dev/null 2>&1
+assert_file_missing "$(get_launcher_script live)"
+
+it "leaves a current launcher for the other branch alone"
+VRCOSC_BRANCH=live
+create_launchers >/dev/null 2>&1
+current="$(get_launcher_script beta)"
+VRCOSC_BRANCH=beta
+create_launchers >/dev/null 2>&1
+before="$(cat "$current")"
+VRCOSC_BRANCH=live
+create_launchers >/dev/null 2>&1
+assert_eq "$before" "$(cat "$current")"
+
+it "warns that VRChat cannot start while VRCOSC owns the prefix"
+assert_contains "$(cat "$(get_launcher_script live)")" "VRChat cannot be started"
+
 summarise

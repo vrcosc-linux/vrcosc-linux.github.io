@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Installing one branch left the other branch's launcher exactly as an older
+  installer had written it. A user who installed beta and then typed the
+  habitual `vrcosc` ran a launcher from before the session-join work: it went
+  straight to protontricks, so with VRChat running it landed in a second wine
+  session and died in Velopack's `GetCurrentProcessPath()` with "Access denied"
+  — the crash this project had already fixed, reported again by someone who
+  never ran the new script. Launchers now carry a generation marker, and an
+  install rewrites any existing launcher that predates it, for either branch.
+
+  Reported by a user whose console log showed all three attempts running
+  `~/.local/bin/vrcosc` pointed at the *live* install directory, while the
+  installer had just written `vrcosc-beta`.
+
+- The launcher's standalone fallback said VRChat would not be detected, but not
+  that VRChat would not be able to start at all: a prefix has one wineserver,
+  and VRCOSC's own session owns it until it exits. It now says so, and says to
+  quit VRCOSC, start VRChat, then start VRCOSC.
+
 ## v1.0.2 — 2026-09-26
 
 - The guard that stops the installer writing settings underneath a running
