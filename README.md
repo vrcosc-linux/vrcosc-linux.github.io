@@ -197,12 +197,21 @@ session and gets full integration: process detection, the game's log, OSC, and
 own — it works standalone, but cannot detect VRChat, so close and relaunch it once
 the game is up. The launcher prints which of the two it did.
 
+A prefix has a single wineserver, so this cuts both ways: while VRCOSC is running
+in a session of its own, **VRChat cannot be started at all** and will appear to do
+nothing when you launch it. Quit VRCOSC, start VRChat, then start VRCOSC again.
+
 Once installed, you can launch VRCOSC:
+* From the **VRCOSC** shortcut on your desktop.
 * From your application menu/search bar (search for **VRCOSC**).
 * Or by running the command in your terminal:
   ```bash
   vrcosc
   ```
+
+Either shortcut can be refused at install time with `--no-desktop-shortcut` and
+`--no-menu-shortcut`. To have the installer start VRCOSC for you as soon as it
+finishes, add `--start`.
 
 ## Troubleshooting
 

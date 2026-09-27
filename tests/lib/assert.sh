@@ -73,6 +73,12 @@ assert_file_exists() {
     if [ -e "$path" ]; then _pass "$what"; else _fail "$what" "missing path: $path"; fi
 }
 
+assert_ge() {
+    local actual="$1" floor="$2" what="${3:-$CURRENT_TEST}"
+    if [ "$actual" -ge "$floor" ]; then _pass "$what"
+    else _fail "$what" "expected at least $floor, got $actual"; fi
+}
+
 assert_file_executable() {
     local path="$1" what="${2:-$CURRENT_TEST}"
     if [ -x "$path" ]; then _pass "$what"; else _fail "$what" "not executable: $path"; fi

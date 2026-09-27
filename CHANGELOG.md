@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- The three new flags below were documented in `--help` and the README but
+  not in `index.html`, which is the page people actually land on. All three
+  are there now, and `tests/unit/test-docs.sh` checks mechanically that every
+  long option `--help` advertises appears in both documents, so the flag list
+  cannot drift again.
+
 - New `--start`: launch VRCOSC as soon as the install finishes, instead of
   making the user go and find the launcher. It is started detached with
   `setsid` and its output is redirected to a per-branch log under
