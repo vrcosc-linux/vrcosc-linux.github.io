@@ -55,6 +55,7 @@ NO_FIREWALL=0
 PATCH_LAUNCH=1            # patching VRChat's launch.exe; refuse it with --no-patch
 MENU_SHORTCUT=1           # application-menu entry; refuse it with --no-menu-shortcut
 DESKTOP_SHORTCUT=1        # icon on the desktop; refuse it with --no-desktop-shortcut
+START_AFTER_INSTALL=0     # launch VRCOSC once the install finishes; see --start
 PURGE_MODE=0              # delete settings and profiles as well; see --purge
 VRC_COMPATDATA=""
 RUNTIME_MODE="auto"        # auto | no-bwrap | host | container
@@ -108,6 +109,13 @@ get_desktop_shortcut() {
     local dir
     dir="$(get_desktop_dir)"
     [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && echo "$dir/vrcosc-beta.desktop" || echo "$dir/vrcosc.desktop"
+}
+
+# Where --start sends the launcher's output. Per branch, so a live and a beta
+# start do not interleave into one unreadable file.
+get_vrcosc_start_log() {
+    local base="${XDG_STATE_HOME:-$HOME/.local/state}/vrcosc-linux"
+    [ "${1:-$VRCOSC_BRANCH}" = "beta" ] && echo "$base/start-beta.log" || echo "$base/start.log"
 }
 
 get_app_icon_path() {
@@ -337,6 +345,9 @@ print_usage() {
     echo "                            nothing. Follows the config directory if it is a symlink."
     echo "      --dry-run             Simulate actions without writing files or running installers"
     echo "      --no-firewall         Inspect firewall rules but add none"
+    echo "      --start               Launch VRCOSC once the install finishes. It is started"
+    echo "                            detached, with its output in a log file whose path is"
+    echo "                            printed. Start VRChat first if you want VRCOSC to see it."
     echo "      --no-menu-shortcut    Do not create the application-menu entry"
     echo "      --no-desktop-shortcut Do not create the shortcut on the desktop"
     echo "      --no-patch            Leave VRChat's launch.exe alone. The bridge is what makes"
@@ -418,6 +429,10 @@ parse_arguments() {
                 ;;
             --no-firewall|--skip-firewall)
                 NO_FIREWALL=1
+                shift
+                ;;
+            --start)
+                START_AFTER_INSTALL=1
                 shift
                 ;;
             --no-menu-shortcut)
@@ -2380,6 +2395,57 @@ create_launchers() {
     echo -e "    $vrcosc_dir"
 }
 
+# Starts the launcher we just wrote, detached, for --start.
+#
+# Detached and logged rather than in the foreground: the launcher execs into
+# wine, which never returns and which writes thousands of fixme: lines to the
+# terminal. setsid puts it in its own session so closing the terminal does not
+# take VRCOSC with it.
+start_vrcosc() {
+    local launcher log
+    launcher="$(get_launcher_script)"
+
+    if [ ! -x "$launcher" ]; then
+        log_error "Cannot start VRCOSC: $launcher is missing or not executable."
+        return 1
+    fi
+
+    # Starting a second instance in the same prefix is never what anyone wants:
+    # the two fight over settings.json and over the OSC ports.
+    if vrcosc_is_running; then
+        log_warn "VRCOSC is already running; not starting another instance."
+        return 0
+    fi
+
+    # Without VRChat up, the launcher takes the prefix's only wineserver for
+    # itself and Steam cannot start the game until VRCOSC exits. Worth saying
+    # before we start it, not after the user wonders why VRChat does nothing.
+    if ! find_vrchat_container_pid >/dev/null 2>&1; then
+        log_warn "VRChat is not running, so VRCOSC will start in its own wine session:"
+        log_warn "it will not see VRChat, and VRChat cannot be started until it exits."
+        log_warn "Quit VRCOSC, start VRChat, then start VRCOSC again for full integration."
+    fi
+
+    log="$(get_vrcosc_start_log)"
+    mkdir -p "$(dirname "$log")"
+    log_info "Starting ${BOLD}$(basename "$launcher")${NC} (detached)..."
+    # A backgrounded command always "succeeds" at the point it is started, so
+    # there is nothing here to test. VRCOSC takes a while to show a window, and
+    # the honest thing is to say where to look rather than claim it came up.
+    # setsid is util-linux, same package as the nsenter the launcher already
+    # wants, so it is all but guaranteed -- but a plain background job still
+    # starts VRCOSC, it just dies with the terminal.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$launcher" > "$log" 2>&1 < /dev/null &
+    else
+        "$launcher" > "$log" 2>&1 < /dev/null &
+    fi
+    local pid=$!
+    disown "$pid" 2>/dev/null || true
+    log_success "VRCOSC launched (pid $pid). If no window appears, its output is in:"
+    echo -e "  $log"
+}
+
 # Delete settings, profiles and logs for the selected branch. Only the branch's
 # own directory is touched: a prefix may also hold VRCOSC-Dev or other
 # directories this installer never created, and those are not ours to remove.
@@ -2600,6 +2666,14 @@ main() {
     install_application_icon
     patch_vrchat_launch_bridge
     create_launchers
+
+    if [ "$START_AFTER_INSTALL" -eq 1 ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log_info "Would start VRCOSC now (--start)."
+        else
+            start_vrcosc
+        fi
+    fi
 }
 
 # Sourced by tests/ to exercise individual functions; run main() only when this

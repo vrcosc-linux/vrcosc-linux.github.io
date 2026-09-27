@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- New `--start`: launch VRCOSC as soon as the install finishes, instead of
+  making the user go and find the launcher. It is started detached with
+  `setsid` and its output is redirected to a per-branch log under
+  `~/.local/state/vrcosc-linux/`, since the launcher execs into wine and
+  never returns. It refuses to start a second instance, and warns first when
+  VRChat is not running, because a standalone VRCOSC owns the prefix's only
+  wineserver and blocks VRChat from starting until it exits.
+
 - The installer wrote an application-menu entry but never a desktop icon, and
   neither was refusable. It now writes both, and both answer to a flag:
   `--no-menu-shortcut` and `--no-desktop-shortcut`. Desktop shortcuts are made

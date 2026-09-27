@@ -46,6 +46,16 @@ assert_contains "$out" "--no-menu-shortcut"
 it "--help documents how to refuse the desktop shortcut"
 assert_contains "$out" "--no-desktop-shortcut"
 
+it "--help documents --start"
+assert_contains "$out" "--start"
+
+it "--dry-run --start says it would start VRCOSC"
+out="$(run_install --dry-run --start)"
+assert_contains "$out" "Would start VRCOSC"
+
+it "and starts nothing"
+assert_not_contains "$out" "VRCOSC launched"
+
 it "accepts both shortcut flags rather than rejecting them as unknown"
 out="$(run_install --no-menu-shortcut --no-desktop-shortcut --dry-run)"
 assert_not_contains "$out" "Unknown option"
